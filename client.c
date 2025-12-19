@@ -12,11 +12,16 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <pthread.h>
+#include <math.h>
+
+#include <raylib.h>
+#include "maps.h"
 
 
 
 
 const int default_rays = 180;
+const int fov = 90;
 const uint16_t max_port = 65535;
 
 
@@ -31,12 +36,14 @@ typedef struct settings {
 
 static settings_t settings = {0};
 
+// Default tcp server connection Port / Ip
 void init_def_server_settings() {
 	settings.server.sin_family = AF_INET;
 	settings.server.sin_port = htons(8080);
 	inet_pton(AF_INET, "127.0.0.1", &settings.server.sin_addr);
 }
 
+// Message type identifier
 typedef enum {
 	LOGIN,
 	LOGOUT,
@@ -46,11 +53,13 @@ typedef enum {
 } message_type_t;
 
 
-// Server safe message struct
+// Server safe player info struct
 typedef struct __attribute__((packed)) {
-	
-
-} message_t;
+	char username[32];
+	message_type_t type;
+	char details[256];
+	point_t position;	
+} user_data_t;
 
 
 
@@ -59,8 +68,10 @@ int parse_args(int argc, char* argv[]) {
 	for (int i = 1; i < argc; i++) {
 		
 		// Usage menu
-		if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0)
+		if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
 			fprintf(stdout, "usage: ./client [-h] [-u USERNAME] [--port PORT] [--ip IP]\n");
+			exit(0);
+		}
 		
 		// Username
 		else if (strcmp(argv[i], "-u") == 0) {
@@ -121,7 +132,7 @@ int parse_args(int argc, char* argv[]) {
 }
 
 // Ensures full read from server
-int full_read(settings_t* settings, message_t* msg) {
+int full_read(settings_t* settings, user_data_t* msg) {
 	size_t n = sizeof(*msg);
 	size_t bytes_read = 0;
 
@@ -151,7 +162,7 @@ int full_read(settings_t* settings, message_t* msg) {
 
 
 // Ensures full write to server
-int full_write(settings_t* settings, message_t* msg) {
+int full_write(settings_t* settings, user_data_t* msg) {
 	size_t n = sizeof(*msg);
 	size_t bytes_written = 0;
 	
@@ -193,8 +204,31 @@ int main(int argc, char* argv[]) {
 	// Thread #1: send to server
 	// Thread #2: Receive from server
 	// Thread Main: Game loop
-	
+
+	point_t start_pos;
+	start_pos.x = 50;
+	start_pos.y = 50;
+
+	double view_angle = M_PI / 4;
+	double ray_displacement = fov / (default_rays * settings.ray_multiplier);
 
 	
+	InitWindow(1000, 500, "Anera: Alpha");
+	while (!WindowShouldClose()) {
+		BeginDrawing();
+		ClearBackground(BLACK);
+
+		// Handles each ray iteratively
+		for (int i = 0; i < default_rays * settings.ray_multiplier; i++) {
+			// Find where it hits
+			
+		}
+
+
+
+		EndDrawing();
+		
+	}
+	CloseWindow();
 	return 0;
 }
