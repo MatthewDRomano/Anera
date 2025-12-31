@@ -216,8 +216,11 @@ void* reaper_thread(void *arg) {
 				*pp = ct->next;
 				atomic_fetch_sub_explicit(&settings.connected_players, 1, memory_order_relaxed);
 				close(ct->client_fd);
-				free(ct);
-				
+
+				// Prints user disconnected and frees associated memory
+				fprintf(stdout, "%s disconnected\n", ct->net_msg.username);
+                                fflush(stdout);
+				free(ct);	
 			}
 				
 			else
@@ -238,7 +241,7 @@ int send_by_type(int sock_fd, uint8_t msg_type) {
 	int i = 0;
 	
 	client_thread_t *c = clients;
-	while (c != NULL) {
+	while (c != NULL && i < MAX_CONNECTIONS) {
 		memcpy(msg + (i++), &c->net_msg, n);
 		c = c->next;
 	}
@@ -294,9 +297,6 @@ void* client_thread(void* arg) {
 					case LOGOUT:
                                 		ct->finished = true;
 						terminate_loop = true;
-						
-						fprintf(stdout, "%s logged out\n", ct->net_msg.username);
-                                                fflush(stdout);
 						break;
 					case SERVER_UPDATE:
 						break;
@@ -315,6 +315,7 @@ void* client_thread(void* arg) {
 			if (pfd.revents & POLLOUT) 
 				if (send_by_type(ct->client_fd, (uint8_t)CLIENT_UPDATE) == -1)
 					ct->finished = true;
+				
 			
 		}
 		pthread_mutex_unlock(&clients_mutex);	
@@ -347,8 +348,10 @@ int main (int argc, char *argv[]) {
 	sa.sa_handler = SIG_IGN;
 	sigaction(SIGHUP, &sa, NULL);
 
+	// Sets default settings
 	init_def_settings();
 
+	// Parses CLI arguments and sets user specified settings
 	if (parse_args(argc, argv) == -1) 
 		return -1;
 
@@ -376,6 +379,7 @@ int main (int argc, char *argv[]) {
 		return -1;
 	}
 
+	// Server is "running"
 	atomic_store(&settings.running, true);
 	fprintf(stdout, "Server Listening on port: %d\n", ntohs(settings.server.sin_port));
 	fflush(stdout);
@@ -406,8 +410,8 @@ int main (int argc, char *argv[]) {
 
 			// Depending on error, client either stays or is removed by kernel from accept queue
 			// Retry accept() always since EMFILE or ENFILE not possible (if check)
-			fprintf(stderr, "Error trying to accept client #%s", 
-				atomic_load(&settings.connected_players) + 1);
+			int cp = atomic_load(&settings.connected_players) + 1;
+			fprintf(stderr, "Error trying to accept client #%s", cp);
 			perror(" ");
 		}
 
@@ -424,27 +428,24 @@ int main (int argc, char *argv[]) {
 		ct->client_fd = client_fd;
 		ct->finished = false;
 		memset(&ct->net_msg, 0, sizeof(ct->net_msg));
-			
+		
+	
 		// Adds client to front of list / Ensures no race
-		pthread_mutex_lock(&clients_mutex);
-		ct->next = clients;
-		clients = ct;
-		pthread_mutex_unlock(&clients_mutex);
-
-		// Error creating thread
-		if (pthread_create(&ct->thread, NULL, client_thread, ct) != 0) {
-			fprintf(stderr, "Error creating client thread\n");
-
+		if (pthread_create(&ct->thread, NULL, client_thread, ct) == 0) {
 			pthread_mutex_lock(&clients_mutex);
-			clients = clients->next;
-			pthread_mutex_unlock(&clients_mutex);
+                	ct->next = clients;
+                	clients = ct;
+                	pthread_mutex_unlock(&clients_mutex);
 
+			atomic_fetch_add_explicit(&settings.connected_players, 1, memory_order_relaxed);
+		}	
+		
+		// Failed to create thread			
+		else {
+			fprintf(stderr, "Error creating client thread\n");
 			close(client_fd);
                         free(ct);
 		}
-
-		atomic_fetch_add_explicit(&settings.connected_players, 1, memory_order_relaxed);
-		
 	}
 	
 	// Server is closing / finishes all threads for reaper to join
