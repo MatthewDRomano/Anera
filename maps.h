@@ -1,3 +1,5 @@
+#include <stdint.h>
+
 #ifndef MAP_H
 #define MAP_H
 
@@ -7,11 +9,6 @@
 #define MAP_LARGE 50
 
 #define TILE_SIZE = 25;	 //Arbitrary unit used for position tracking
-
-typedef struct {
-	int x;
-	int y;
-} point_t;
 
 typedef struct {
 	int size; 	 // Width and height
