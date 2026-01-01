@@ -60,6 +60,8 @@ typedef struct {
 } settings_t;
 
 static settings_t settings;
+// Volatile ignores compiler opitmizations due to updating in async signal handler
+static volatile sig_atomic_t shutdown_requested = 0;
 
 void init_def_settings() {
 	settings.server.sin_family = AF_INET;
@@ -212,9 +214,13 @@ void* reaper_thread(void *arg) {
 			client_thread_t *ct = *pp;
 			
 			if (ct->finished) {
+				// Avoids deadlock
+				pthread_mutex_unlock(&clients_mutex);
 				pthread_join(ct->thread, NULL);
+				pthread_mutex_lock(&clients_mutex);
+				
 				*pp = ct->next;
-				atomic_fetch_sub_explicit(&settings.connected_players, 1, memory_order_relaxed);
+				atomic_fetch_sub(&settings.connected_players, 1);
 				close(ct->client_fd);
 
 				// Prints user disconnected and frees associated memory
@@ -312,7 +318,7 @@ void* client_thread(void* arg) {
 			}
 		
 	
-			if (pfd.revents & POLLOUT) 
+			if (pfd.revents & POLLOUT)
 				if (send_by_type(ct->client_fd, (uint8_t)CLIENT_UPDATE) == -1)
 					ct->finished = true;
 				
@@ -328,7 +334,8 @@ void* client_thread(void* arg) {
 
 // Allows graceful shutdown for SIGINT / SIGTERM
 void shutdown_handler(int signum) {
-	atomic_store(&settings.running, false);
+	shutdown_requested = 1; // Async safe sig_atomic_t
+	close(settings.socket_fd); // Interrupts accept()
 
 	const char msg[] = "Shutdown Signaled\n";
 	write(1, msg, sizeof(msg) - 1);
@@ -392,16 +399,19 @@ int main (int argc, char *argv[]) {
 	}
 
 	// Server loop
-	while (atomic_load(&settings.running)) {
-		if (atomic_load(&settings.connected_players) >= settings.max_players)
+	while (!shutdown_requested) {
+
+		if (atomic_load(&settings.connected_players) >= settings.max_players) {
+			sleep(1); // Avoids constant CPU use
 			continue;
+		}
 
 		struct sockaddr_in new_client;
 		socklen_t adderlen = sizeof(new_client);
 		int client_fd;
 
 		// Checks for accept() error / BLOCKING
-		while (atomic_load(&settings.running) && ((client_fd = accept(settings.socket_fd, 
+		while (!shutdown_requested && ((client_fd = accept(settings.socket_fd, 
 			(struct sockaddr*)&new_client, 
 			&adderlen)) == -1)) {
 			
@@ -410,24 +420,22 @@ int main (int argc, char *argv[]) {
 
 			// Depending on error, client either stays or is removed by kernel from accept queue
 			// Retry accept() always since EMFILE or ENFILE not possible (if check)
-			int cp = atomic_load(&settings.connected_players) + 1;
-			fprintf(stderr, "Error trying to accept client #%s", cp);
-			perror(" ");
+			// perror("accept");
 		}
 
 		// Exits server loop if terminated
-		if (!atomic_load(&settings.running))
+		if (shutdown_requested)
 			break;
 			
 		// Create new client once accepted
-		client_thread_t *ct = (client_thread_t*)malloc(sizeof(client_thread_t));
+		client_thread_t *ct = (client_thread_t*)calloc(1, sizeof(client_thread_t));
 		if (!ct) {
 			fprintf(stderr, "Error allocating space for new client thread\n");
 			break;
 		}
 		ct->client_fd = client_fd;
-		ct->finished = false;
-		memset(&ct->net_msg, 0, sizeof(ct->net_msg));
+		//ct->finished = false;
+		//memset(&ct->net_msg, 0, sizeof(ct->net_msg));
 		
 	
 		// Adds client to front of list / Ensures no race
@@ -437,7 +445,7 @@ int main (int argc, char *argv[]) {
                 	clients = ct;
                 	pthread_mutex_unlock(&clients_mutex);
 
-			atomic_fetch_add_explicit(&settings.connected_players, 1, memory_order_relaxed);
+			atomic_fetch_add(&settings.connected_players, 1);
 		}	
 		
 		// Failed to create thread			
@@ -448,6 +456,10 @@ int main (int argc, char *argv[]) {
 		}
 	}
 	
+	// Shutdown requested. Updates running value to false for all threads
+	atomic_store(&settings.running, false);
+	
+	
 	// Server is closing / finishes all threads for reaper to join
 	// Sends logout message
 	client_thread_t *c = clients;
@@ -457,10 +469,10 @@ int main (int argc, char *argv[]) {
 		c->finished = true;
 		c = c->next;
 	}
-	pthread_mutex_unlock(&clients_mutex);
 
 	// Wakes up reaper if sleeping; ready to join
 	pthread_cond_broadcast(&clients_cond);
+	pthread_mutex_unlock(&clients_mutex);
 
 	pthread_join(reaper, NULL);
 	pthread_mutex_destroy(&clients_mutex);

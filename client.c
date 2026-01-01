@@ -19,7 +19,7 @@
 #include "maps.h"
 
 #define MAX_CONNECTIONS 15
-#define DEFaULT_RAYS 180
+#define DEFAULT_RAYS 180
 #define FOV 90
 #define MAX_PORT 65535
 
@@ -84,7 +84,7 @@ int parse_args(int argc, char* argv[]) {
 		// Username
 		else if (strcmp(argv[i], "-u") == 0) {
 			// Missing arg
-			if (i++ == argc) {
+			if (++i == argc) {
 				fprintf(stderr, "Missing username\n");
 				return -1;
 			}
@@ -237,8 +237,10 @@ int write_to_server(int socket_fd, user_data_t* msg) {
 
 void* recv_thread(void *arg) {
 	while (atomic_load(&settings.connected)) {
-		if (read_from_server(settings.socket_fd, players) == -1)
+		if (read_from_server(settings.socket_fd, players) == -1) {
 			atomic_store(&settings.connected, false);	
+			break;
+		}
 		
 		message_type_t type = (message_type_t)players[0].type;
 		switch (type) {
