@@ -1,3 +1,5 @@
+#define _GNU_SOURCE // Allows GNU strerror_r
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -28,7 +30,7 @@
 
 // Message type identifier
 typedef enum {
-        LOGIN,
+	LOGIN,
         LOGOUT,
         SERVER_UPDATE,
         CLIENT_UPDATE
@@ -42,8 +44,9 @@ typedef struct __attribute__((packed)) {
 } user_data_t;
 
 
+// Holds MAX_CONNECTIONS slots of user_data_t. Unused slots store 0 and are ignored
 static user_data_t players[MAX_CONNECTIONS] = {0};
-
+static volatile sig_atomic_t shutdown_requested = 0;
 
 typedef struct settings {
         user_data_t client_info;
@@ -77,7 +80,7 @@ int parse_args(int argc, char* argv[]) {
 		
 		// Usage menu
 		if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-			fprintf(stdout, "usage: ./client [-h] [-u USERNAME] [--port PORT] [--ip IP]\n");
+			fprintf(stdout, "usage: ./client [-h] [-u USERNAME] [--port PORT] [--ip IP] [--domain DOMAIN]\n");
 			exit(0);
 		}
 		
@@ -190,13 +193,12 @@ int read_from_server(int socket_fd, user_data_t* users_info) {
 		if (result < 0) {
 			if (errno == EINTR)
 				continue;
-			perror("Error reading from server");
-			return -1;
+			return errno;
 		}
 		
 		// EOF signaled; server connection closed
 		else if (result == 0)
-			return -1;
+			return EOF;
 			
 
 		bytes_read += result;
@@ -219,14 +221,7 @@ int write_to_server(int socket_fd, user_data_t* msg) {
 		if (result < 0) {
 			if (errno == EINTR)
 				continue;
-			perror("Error while writing to server");
-			return -1;
-		}
-
-		
-		else if (result == 0) {
-			perror("Connection closed while writing");
-			return -1;
+			return errno;
 		}
 
 		bytes_written += result;
@@ -237,7 +232,16 @@ int write_to_server(int socket_fd, user_data_t* msg) {
 
 void* recv_thread(void *arg) {
 	while (atomic_load(&settings.connected)) {
-		if (read_from_server(settings.socket_fd, players) == -1) {
+		int result = 0;
+		if ((result = read_from_server(settings.socket_fd, players)) != 0) {
+			if (result == EOF)
+				fprintf(stderr, "EOF reach while reading from server\n");
+			else { 
+				char err_buf[128];
+                                char *msg = strerror_r(result, err_buf, sizeof(err_buf));
+                                fprintf(stderr, "Error reading from server: %s\n", msg);
+			}
+
 			atomic_store(&settings.connected, false);	
 			break;
 		}
@@ -263,8 +267,15 @@ void* send_thread(void *arg) {
 		pthread_mutex_lock(&settings_mutex);
 		
 		settings.client_info.type = (uint8_t)SERVER_UPDATE;
-		if (write_to_server(settings.socket_fd, &settings.client_info) == -1)
+		
+		int result = 0;
+		if ((result = write_to_server(settings.socket_fd, &settings.client_info)) != 0) {
 			atomic_store(&settings.connected, false);
+			
+			char err_buf[128];
+                        char *msg = strerror_r(result, err_buf, sizeof(err_buf));
+                        fprintf(stderr, "Error while writing to server: %s\n", msg);
+		}
 		
 		pthread_mutex_unlock(&settings_mutex);
 	}
@@ -273,7 +284,8 @@ void* send_thread(void *arg) {
 
 // Graceful shutdown on SIGINT SIGTERM SIGHUP
 void shutdown_handler(int signum) {
-	atomic_store(&settings.connected, false);
+	shutdown_requested = 1;
+	close(settings.socket_fd); // Interrupts blocking calls (EX: connect() on full queue)
 }
 
 
@@ -288,7 +300,7 @@ int main(int argc, char* argv[]) {
 	// Parse in-line arguments and set default settings
 	init_def_settings(); 
 	
-	if (parse_args(argc, argv))
+	if (parse_args(argc, argv) == -1)
 		return -1;
 		
 	// IPv4 TCP default protocol
@@ -300,9 +312,11 @@ int main(int argc, char* argv[]) {
 	
 	// Connects socket to server
 	while (connect(settings.socket_fd, (struct sockaddr*)(&settings.server), sizeof(settings.server)) == -1) {
-		if (errno == EINTR)                                                                                                  		continue;
-		fprintf(stderr, "Failed to connect socket to server");
-		perror(" ");
+		if (errno == EINTR && !shutdown_requested)
+			continue;
+
+		// Error occurred or shutdown requested
+		perror("Failed to connect socket to server");
 		return -1;
 	}
 	
@@ -324,7 +338,10 @@ int main(int argc, char* argv[]) {
 	pthread_mutex_unlock(&settings_mutex);
 
 	while (atomic_load(&settings.connected)) {
-		
+		if (shutdown_requested)
+			atomic_store(&settings.connected, false);
+
+		sleep(1);		
 	}
 	/*
 	point_t start_pos;
@@ -355,9 +372,11 @@ int main(int argc, char* argv[]) {
 		
 	// Sends logout
 	pthread_mutex_lock(&settings_mutex);
-	settings.client_info.type = (uint8_t)LOGOUT;
-	write_to_server(settings.socket_fd, &settings.client_info);
-	close(settings.socket_fd);
+	if (!shutdown_requested) {
+		settings.client_info.type = (uint8_t)LOGOUT;
+		write_to_server(settings.socket_fd, &settings.client_info);
+		close(settings.socket_fd);
+	}
 	pthread_mutex_unlock(&settings_mutex);
 
 	pthread_join(send_tid, NULL);

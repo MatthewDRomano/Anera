@@ -1,3 +1,5 @@
+#define _GNU_SOURCE // Allows GNU strerror_r
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -144,15 +146,13 @@ int read_from_client(int socket_fd, user_data_t *user_info) {
 		if (result < 0) {
 			if (errno == EINTR)
 				continue;
-			perror("Error reading from client");
-			return -1;
+			// Propagates error
+			return errno;
 		}
 
 		// EOF; client disconnected
-		else if (result == 0) { 
-			fprintf(stderr, "EOF reached reading from client\n");
-			return -1;
-		}
+		else if (result == 0) 
+			return EOF;
 
 		bytes_read += result;
 	}
@@ -173,8 +173,8 @@ int write_to_client(int socket_fd, user_data_t *users_info, int users) {
 		if (result < 0) {
 			if (errno == EINTR)
 				continue;
-			perror("Error writing to client");
-			return -1;
+			// Propagates error
+			return errno;
 		}
 
 		bytes_written += result;
@@ -214,7 +214,7 @@ void* reaper_thread(void *arg) {
 			client_thread_t *ct = *pp;
 			
 			if (ct->finished) {
-				// Avoids deadlock
+				// Avoids deadlock in other threads if join stalls
 				pthread_mutex_unlock(&clients_mutex);
 				pthread_join(ct->thread, NULL);
 				pthread_mutex_lock(&clients_mutex);
@@ -240,69 +240,82 @@ void* reaper_thread(void *arg) {
 	return NULL;
 }
 
-// Assumes clients mutex locked
+// Assumes clients mutex unlocked
 int send_by_type(int sock_fd, uint8_t msg_type) {
 	user_data_t msg[MAX_CONNECTIONS] = {0};
 	const size_t n = sizeof(user_data_t);
 	int i = 0;
-	
+
 	client_thread_t *c = clients;
+	pthread_mutex_lock(&clients_mutex);
 	while (c != NULL && i < MAX_CONNECTIONS) {
 		memcpy(msg + (i++), &c->net_msg, n);
 		c = c->next;
 	}
+	pthread_mutex_unlock(&clients_mutex);
 	
 	msg[0].type = msg_type;
-	if (write_to_client(sock_fd, msg, MAX_CONNECTIONS) == -1)
-		return -1;
-	
-	return 0;
+	return write_to_client(sock_fd, msg, MAX_CONNECTIONS);
+}
+
+// Safely marks thread ready to be reaped
+void mark_thread_finished(client_thread_t *ct) {
+	pthread_mutex_lock(&clients_mutex);
+	ct->finished = true;
+	pthread_mutex_unlock(&clients_mutex);
 }
 
 void* client_thread(void* arg) {	
 	client_thread_t *ct = (client_thread_t*)arg;
 	
 	struct pollfd pfd;
-
-	while (!ct->finished) {	
-	//pthread_mutex_lock(&clients_mutex);
-		pfd.fd = ct->client_fd;
-        	pfd.events = POLLIN;
 	
-		//if (pending write)
-		pfd.events |= POLLOUT;
+	while (!ct->finished) { // May need mutex / atomic	
+		pfd.fd = ct->client_fd;
+        	pfd.events = POLLIN | POLLOUT;
+
 		
 		int ready = poll(&pfd, 1, 100); // Waits 100 ms
 
-		pthread_mutex_lock(&clients_mutex);
 		if (ready > 0) {
 			
 			if (pfd.revents & (POLLHUP | POLLERR)) {
 				send_by_type(ct->client_fd, (uint8_t)LOGOUT);
-                                ct->finished = true;
-				pthread_mutex_unlock(&clients_mutex);
+				mark_thread_finished(ct);
 				break;
                         }
 		
 			if (pfd.revents & POLLIN) {
 				// Reads from client
-				if (read_from_client(ct->client_fd, &ct->net_msg) == -1) {
-					// ALL -1 returns on blocking read() are catastrophic (Except EINTR)
-					ct->finished = true;
-					pthread_mutex_unlock(&clients_mutex);
+				int result = 0;
+				user_data_t buf;
+				if ((result = read_from_client(ct->client_fd, &buf)) != 0) {
+					if (result == EOF)
+						fprintf(stderr, "EOF reached on %s\n", buf.username);
+					else {
+						char err_buf[128];
+                                        	char *msg = strerror_r(result, err_buf, sizeof(err_buf));
+                                        	fprintf(stderr, "Client read error: %s\n", msg);
+					}
+					
+					mark_thread_finished(ct);
 					break;
 				}
 				
+				pthread_mutex_lock(&clients_mutex);
+				memcpy(&ct->net_msg, &buf, sizeof(user_data_t));
+				pthread_mutex_unlock(&clients_mutex);
+				
 				// handle message types accordingly
-				bool terminate_loop = false;
+				/*bool terminate_loop = false;
 				switch ((message_type_t)ct->net_msg.type) {
 					case LOGIN:
 						fprintf(stdout, "%s logged in\n", ct->net_msg.username);
 						fflush(stdout);
 						break;
 					case LOGOUT:
-                                		ct->finished = true;
-						terminate_loop = true;
+                                		//ct->finished = true;
+						//terminate_loop = true;
 						break;
 					case SERVER_UPDATE:
 						break;
@@ -315,20 +328,45 @@ void* client_thread(void* arg) {
                                 	pthread_mutex_unlock(&clients_mutex);
 					break;
 				}
+				
+				*/
+
+				if ((message_type_t)buf.type == LOGIN) {
+					fprintf(stdout, "%s logged in\n", buf.username);
+					fflush(stdout);
+				}
 			}
 		
 	
-			if (pfd.revents & POLLOUT)
-				if (send_by_type(ct->client_fd, (uint8_t)CLIENT_UPDATE) == -1)
-					ct->finished = true;
+			if (pfd.revents & POLLOUT) {
+				int result = 0;
+				if ((result = send_by_type(ct->client_fd, (uint8_t)CLIENT_UPDATE)) != 0) {
+					char err_buf[128];
+					char *msg = strerror_r(result, err_buf, sizeof(err_buf));
+					fprintf(stderr, "Client write error: %s\n", msg);
+					mark_thread_finished(ct);
+					break;
+				}
+			}
+
 				
 			
 		}
-		pthread_mutex_unlock(&clients_mutex);	
+		
+		// Error occurred during poll()
+		else if (ready < 0) {
+			if (errno != EINTR) {
+				perror("Poll failed");
+				mark_thread_finished(ct);
+			}
+		}
+		
 	}
 	
+	pthread_mutex_lock(&clients_mutex);
 	pthread_cond_broadcast(&clients_cond);
-	
+	pthread_mutex_unlock(&clients_mutex);	
+
 	return NULL;
 }
 
@@ -336,9 +374,6 @@ void* client_thread(void* arg) {
 void shutdown_handler(int signum) {
 	shutdown_requested = 1; // Async safe sig_atomic_t
 	close(settings.socket_fd); // Interrupts accept()
-
-	const char msg[] = "Shutdown Signaled\n";
-	write(1, msg, sizeof(msg) - 1);
 }
 
 int main (int argc, char *argv[]) {
@@ -373,8 +408,7 @@ int main (int argc, char *argv[]) {
 	while (bind(settings.socket_fd, (struct sockaddr*)(&settings.server), sizeof(settings.server)) == -1) {
 		if (errno == EINTR)
 			continue;
-		fprintf(stderr, "Failed to bind socket to port %d", ntohs(settings.server.sin_port));
-		perror(" ");
+		perror("Bind to port failed");
 		return -1;
 	}
 
@@ -394,7 +428,7 @@ int main (int argc, char *argv[]) {
 	// Spawns reaper thread to cleanup dead client threads
 	pthread_t reaper;
 	if (pthread_create(&reaper, NULL, reaper_thread, NULL) != 0) {
-		perror("Error spawning reaper thread");
+		perror("Failed to spawn reaper thread");
 		return -1;
 	}
 
@@ -420,7 +454,6 @@ int main (int argc, char *argv[]) {
 
 			// Depending on error, client either stays or is removed by kernel from accept queue
 			// Retry accept() always since EMFILE or ENFILE not possible (if check)
-			// perror("accept");
 		}
 
 		// Exits server loop if terminated
@@ -434,16 +467,13 @@ int main (int argc, char *argv[]) {
 			break;
 		}
 		ct->client_fd = client_fd;
-		//ct->finished = false;
-		//memset(&ct->net_msg, 0, sizeof(ct->net_msg));
 		
 	
 		// Adds client to front of list / Ensures no race
+		pthread_mutex_lock(&clients_mutex);
 		if (pthread_create(&ct->thread, NULL, client_thread, ct) == 0) {
-			pthread_mutex_lock(&clients_mutex);
                 	ct->next = clients;
                 	clients = ct;
-                	pthread_mutex_unlock(&clients_mutex);
 
 			atomic_fetch_add(&settings.connected_players, 1);
 		}	
@@ -454,6 +484,8 @@ int main (int argc, char *argv[]) {
 			close(client_fd);
                         free(ct);
 		}
+
+		pthread_mutex_unlock(&clients_mutex);
 	}
 	
 	// Shutdown requested. Updates running value to false for all threads
@@ -465,7 +497,7 @@ int main (int argc, char *argv[]) {
 	client_thread_t *c = clients;
 	pthread_mutex_lock(&clients_mutex);
 	while (c != NULL) {
-		send_by_type(c->client_fd, (uint8_t)LOGOUT);
+		//send_by_type(c->client_fd, (uint8_t)LOGOUT);
 		c->finished = true;
 		c = c->next;
 	}
