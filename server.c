@@ -20,28 +20,10 @@
 
 #include "anera_net.h"
 
-//#define DEFAULT_PORT 5555
 #define MIN_PORT 1024
 #define MAX_PORT 49151
-//#define MAX_CONNECTIONS 15
 #define CLIENT_STACK (1024 * 1024)  // 1 MB
-/*
-// Message type identifier
-typedef enum {
-	LOGIN,
-	LOGOUT,
-	SERVER_UPDATE,
-	CLIENT_UPDATE
-} message_type_t;
 
-// Network safe player info struct
-// NOTE: Struct variables may be misaligned on arrival on different architectures
-typedef struct __attribute__((packed)) {
-	uint8_t type; // Safe for network transfer; portibility on varying systems; can cast to enum for readability
-        char username[32];
-        uint16_t pos_x, pos_y;
-} user_data_t;
-*/
 typedef struct client_thread {
 	pthread_t thread;
 	int client_fd;
@@ -248,7 +230,7 @@ void* client_io_thread(void* arg) {
 	
 	pthread_mutex_lock(&clients_mutex);
 	int locked = true;
-	while (!ct->finished) { // mutex this and client_fd below?
+	while (!ct->finished) {
 		pfd.fd = ct->client_fd;
         	pfd.events = POLLIN | POLLOUT;
 		

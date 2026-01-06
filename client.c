@@ -16,42 +16,26 @@
 #include <pthread.h>
 #include <math.h>
 #include <stdatomic.h>
+#include <semaphore.h>
 
 #include <raylib.h>
 #include "maps.h"
 #include "anera_net.h"
 
 
-//#define MAX_CONNECTIONS 15
 #define DEFAULT_RAYS 180
 #define FOV 90
 #define MAX_PORT 65535
-//#define DEFAULT_PORT 5555
 
 
-
-/*
-// Message type identifier
-typedef enum {
-	LOGIN,
-        LOGOUT,
-        SERVER_UPDATE,
-        CLIENT_UPDATE
-} message_type_t;
-
-// Server safe player info struct
-typedef struct __attribute__((packed)) {
-	uint8_t type; // Constant size across architectures; Cast to message_type_t before using
-	char username[32];
-	uint16_t pos_x, pos_y;
-} user_data_t;
-*/
 
 // Holds MAX_CONNECTIONS slots of user_data_t. Unused slots store 0 and are ignored
 static user_data_t players[MAX_CONNECTIONS] = {0};
+static pthread_mutex_t players_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 static user_data_t client_info = {0};
 static pthread_mutex_t client_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t players_mutex = PTHREAD_MUTEX_INITIALIZER;
+static sem_t send_sem;
 
 typedef struct settings {
         int ray_multiplier;
@@ -237,7 +221,7 @@ void* recv_thread(void *arg) {
 
 void* send_thread(void *arg) {
 	while (atomic_load(&settings.connected)) {
-
+		
 		int result = 0;
 		if ((result = send_by_type(settings.socket_fd, SERVER_UPDATE)) != 0) {
 			atomic_store(&settings.connected, false);
@@ -246,7 +230,15 @@ void* send_thread(void *arg) {
                         char *msg = strerror_r(result, err_buf, sizeof(err_buf));
                         fprintf(stderr, "Error while writing to server: %s\n", msg);
 		}
+		fprintf(stdout, "!\n");
+		fflush(stdout);	
+		// Wait for at least one signal
+		sem_wait(&send_sem);
 		
+		while (sem_trywait(&send_sem) == 0) {
+            		// drain the counter if multiple signals sent
+            		// therefore most recent client info is sent
+        	}	
 	}
 	return NULL;
 }
@@ -291,6 +283,9 @@ int main(int argc, char* argv[]) {
 	// Connection successful
 	atomic_store(&settings.connected, true);
 
+	// Login message
+        send_by_type(settings.socket_fd, LOGIN);
+
 	// Thread #1: send to server
 	pthread_t send_tid;
 	pthread_create(&send_tid, NULL, send_thread, NULL);
@@ -299,9 +294,6 @@ int main(int argc, char* argv[]) {
 	pthread_t recv_tid;
         pthread_create(&recv_tid, NULL, recv_thread, NULL);
 
-	// Login message	
-	send_by_type(settings.socket_fd, LOGIN);
-	
 	// Thread Main: Game loop
 	fprintf(stdout, "Connected to server\n");
         fflush(stdout);
@@ -309,6 +301,8 @@ int main(int argc, char* argv[]) {
 		if (shutdown_requested)
 			atomic_store(&settings.connected, false);
 
+
+		sem_post(&send_sem); // tells send thread client updated
 		sleep(1);		
 	}
 	/*
@@ -347,6 +341,7 @@ int main(int argc, char* argv[]) {
 	pthread_join(send_tid, NULL);
         pthread_join(recv_tid, NULL);
 	pthread_mutex_destroy(&client_mutex);
-	
+	pthread_mutex_destroy(&players_mutex);
+	sem_destroy(&send_sem);	
 	return 0;
 }
