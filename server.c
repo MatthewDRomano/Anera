@@ -16,12 +16,16 @@
 #include <pthread.h>
 #include <poll.h>
 #include <stdatomic.h>
+#include <time.h>
 
-#define DEFAULT_PORT 5555
+#include "anera_net.h"
+
+//#define DEFAULT_PORT 5555
 #define MIN_PORT 1024
 #define MAX_PORT 49151
-#define MAX_CONNECTIONS 15
-
+//#define MAX_CONNECTIONS 15
+#define CLIENT_STACK (1024 * 1024)  // 1 MB
+/*
 // Message type identifier
 typedef enum {
 	LOGIN,
@@ -37,7 +41,7 @@ typedef struct __attribute__((packed)) {
         char username[32];
         uint16_t pos_x, pos_y;
 } user_data_t;
-
+*/
 typedef struct client_thread {
 	pthread_t thread;
 	int client_fd;
@@ -54,9 +58,9 @@ static pthread_cond_t clients_cond = PTHREAD_COND_INITIALIZER;
 
 typedef struct {
 	atomic_int connected_players;
-	int socket_fd; // for listening only
 	atomic_bool running;
-	uint8_t max_players;
+	int socket_fd; // for listening only
+	int max_players;
 	struct sockaddr_in server;
 
 } settings_t;
@@ -69,10 +73,33 @@ void init_def_settings() {
 	settings.server.sin_family = AF_INET;
 	settings.server.sin_port = htons(DEFAULT_PORT);
 	settings.server.sin_addr.s_addr = INADDR_ANY;
+
 	settings.socket_fd = 0;
 	settings.connected_players = ATOMIC_VAR_INIT(0);
 	settings.running = ATOMIC_VAR_INIT(false);
 	settings.max_players = MAX_CONNECTIONS;
+
+}
+
+// Mutex needed because write() to log.txt in different threads. ONLY needed around log() 
+int errlog(int tid, char *call, int fd, int errnum, char *client) {
+        // format Timestamp | tid | method name, fd, errno, strerror, client username
+        FILE* log_f = fopen("log.txt", "a");
+
+	char time[32];
+	struct timespec ts;
+    	struct tm tm;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	gmtime_r(&ts.tv_sec, &tm);
+	strftime(time, sizeof(time), "%Y-%m-%d %H:%M:%S", &tm);
+
+	// start mutex
+	fprintf(log_f, "%s | tid=%d | %s | fd=%d | errno=%d | %s | Client name: %s\n", time, tid, call, fd, errnum, strerror(errno), client);
+	fflush(log_f);	
+	// end log mutex
+	
+	fclose(log_f);
+	return 0;
 }
 
 
@@ -120,7 +147,7 @@ int parse_args(int argc, char *argv[]) {
 				return -1;
 			}
 
-			settings.max_players = (uint8_t)n;
+			settings.max_players = (int)n;
 		}
 
 		else {
@@ -128,57 +155,6 @@ int parse_args(int argc, char *argv[]) {
 			return -1;
 		}
 	}
-
-	return 0;
-}
-
-// Ensures full read from client
-int read_from_client(int socket_fd, user_data_t *user_info) {
-	size_t const n = sizeof(user_data_t);
-	size_t bytes_read = 0;
-	ssize_t result;
-
-	while (bytes_read < n) {
-
-		result = read(socket_fd, (char*)user_info + bytes_read, n - bytes_read);
-		
-		// Error occured
-		if (result < 0) {
-			if (errno == EINTR)
-				continue;
-			// Propagates error
-			return errno;
-		}
-
-		// EOF; client disconnected
-		else if (result == 0) 
-			return EOF;
-
-		bytes_read += result;
-	}
-	
-	return 0;
-}
-
-// Ensures all user info writes to client --Assumes dynamically allocated users_info---
-int write_to_client(int socket_fd, user_data_t *users_info, int users) {
-	const size_t n = users * sizeof(user_data_t);
-	size_t bytes_written = 0;
-	ssize_t result;
-
-	while (bytes_written < n) {
-		result = write(socket_fd, (char*)users_info + bytes_written, n - bytes_written);
-
-		// Error writing to client -1
-		if (result < 0) {
-			if (errno == EINTR)
-				continue;
-			// Propagates error
-			return errno;
-		}
-
-		bytes_written += result;
-	}	
 
 	return 0;
 }
@@ -241,7 +217,7 @@ void* reaper_thread(void *arg) {
 }
 
 // Assumes clients mutex unlocked
-int send_by_type(int sock_fd, uint8_t msg_type) {
+int send_by_type(int sock_fd, message_type_t msg_type) {
 	user_data_t msg[MAX_CONNECTIONS] = {0};
 	const size_t n = sizeof(user_data_t);
 	int i = 0;
@@ -254,8 +230,8 @@ int send_by_type(int sock_fd, uint8_t msg_type) {
 	}
 	pthread_mutex_unlock(&clients_mutex);
 	
-	msg[0].type = msg_type;
-	return write_to_client(sock_fd, msg, MAX_CONNECTIONS);
+	msg[0].type = (uint8_t)msg_type;
+	return full_write(sock_fd, msg, MAX_CONNECTIONS);
 }
 
 // Safely marks thread ready to be reaped
@@ -265,14 +241,19 @@ void mark_thread_finished(client_thread_t *ct) {
 	pthread_mutex_unlock(&clients_mutex);
 }
 
-void* client_thread(void* arg) {	
+void* client_io_thread(void* arg) {	
 	client_thread_t *ct = (client_thread_t*)arg;
 	
 	struct pollfd pfd;
 	
-	while (!ct->finished) { // May need mutex / atomic	
+	pthread_mutex_lock(&clients_mutex);
+	int locked = true;
+	while (!ct->finished) { // mutex this and client_fd below?
 		pfd.fd = ct->client_fd;
         	pfd.events = POLLIN | POLLOUT;
+		
+		pthread_mutex_unlock(&clients_mutex);
+		locked = false;
 
 		
 		int ready = poll(&pfd, 1, 100); // Waits 100 ms
@@ -280,16 +261,16 @@ void* client_thread(void* arg) {
 		if (ready > 0) {
 			
 			if (pfd.revents & (POLLHUP | POLLERR)) {
-				send_by_type(ct->client_fd, (uint8_t)LOGOUT);
+				send_by_type(ct->client_fd, LOGOUT);
 				mark_thread_finished(ct);
 				break;
                         }
-		
+			
+			// Reads from client	
 			if (pfd.revents & POLLIN) {
-				// Reads from client
 				int result = 0;
 				user_data_t buf;
-				if ((result = read_from_client(ct->client_fd, &buf)) != 0) {
+				if ((result = full_read(ct->client_fd, &buf, 1)) != 0) {
 					if (result == EOF)
 						fprintf(stderr, "EOF reached on %s\n", buf.username);
 					else {
@@ -306,30 +287,6 @@ void* client_thread(void* arg) {
 				memcpy(&ct->net_msg, &buf, sizeof(user_data_t));
 				pthread_mutex_unlock(&clients_mutex);
 				
-				// handle message types accordingly
-				/*bool terminate_loop = false;
-				switch ((message_type_t)ct->net_msg.type) {
-					case LOGIN:
-						fprintf(stdout, "%s logged in\n", ct->net_msg.username);
-						fflush(stdout);
-						break;
-					case LOGOUT:
-                                		//ct->finished = true;
-						//terminate_loop = true;
-						break;
-					case SERVER_UPDATE:
-						break;
-					default: // Invalid message type
-						break;
-				}
-
-				// Skips write if logout message was received
-				if (terminate_loop) {
-                                	pthread_mutex_unlock(&clients_mutex);
-					break;
-				}
-				
-				*/
 
 				if ((message_type_t)buf.type == LOGIN) {
 					fprintf(stdout, "%s logged in\n", buf.username);
@@ -337,10 +294,10 @@ void* client_thread(void* arg) {
 				}
 			}
 		
-	
+			// Writes to client
 			if (pfd.revents & POLLOUT) {
 				int result = 0;
-				if ((result = send_by_type(ct->client_fd, (uint8_t)CLIENT_UPDATE)) != 0) {
+				if ((result = send_by_type(ct->client_fd, CLIENT_UPDATE)) != 0) {
 					char err_buf[128];
 					char *msg = strerror_r(result, err_buf, sizeof(err_buf));
 					fprintf(stderr, "Client write error: %s\n", msg);
@@ -354,16 +311,20 @@ void* client_thread(void* arg) {
 		}
 		
 		// Error occurred during poll()
-		else if (ready < 0) {
+		else if (ready < 0)
 			if (errno != EINTR) {
 				perror("Poll failed");
 				mark_thread_finished(ct);
+				break;
 			}
-		}
-		
+	
+		pthread_mutex_lock(&clients_mutex);
+		locked = true;
 	}
 	
-	pthread_mutex_lock(&clients_mutex);
+	if (!locked) 
+		pthread_mutex_lock(&clients_mutex);
+
 	pthread_cond_broadcast(&clients_cond);
 	pthread_mutex_unlock(&clients_mutex);	
 
@@ -423,6 +384,7 @@ int main (int argc, char *argv[]) {
 	// Server is "running"
 	atomic_store(&settings.running, true);
 	fprintf(stdout, "Server Listening on port: %d\n", ntohs(settings.server.sin_port));
+	fprintf(stdout, "Max players: %d\n", settings.max_players);
 	fflush(stdout);
 
 	// Spawns reaper thread to cleanup dead client threads
@@ -432,13 +394,21 @@ int main (int argc, char *argv[]) {
 		return -1;
 	}
 
+	// Creates stack size attribute for client threads (1MB)
+	pthread_attr_t client_attr;
+	pthread_attr_init(&client_attr);
+	if (pthread_attr_setstacksize(&client_attr, CLIENT_STACK) != 0) {
+		fprintf(stderr, "Error setting client thread stack size\n");
+		return -1;
+	}
+
 	// Server loop
 	while (!shutdown_requested) {
 
-		if (atomic_load(&settings.connected_players) >= settings.max_players) {
+		/*if (atomic_load(&settings.connected_players) >= settings.max_players) {
 			sleep(1); // Avoids constant CPU use
 			continue;
-		}
+		}*/
 
 		struct sockaddr_in new_client;
 		socklen_t adderlen = sizeof(new_client);
@@ -455,15 +425,22 @@ int main (int argc, char *argv[]) {
 			// Depending on error, client either stays or is removed by kernel from accept queue
 			// Retry accept() always since EMFILE or ENFILE not possible (if check)
 		}
-
+		
 		// Exits server loop if terminated
 		if (shutdown_requested)
 			break;
-			
+
+		// Server is full
+		if (atomic_load(&settings.connected_players) == settings.max_players) {
+			send_by_type(client_fd, LOGOUT);
+			close(client_fd);
+			continue;
+		}
+
 		// Create new client once accepted
 		client_thread_t *ct = (client_thread_t*)calloc(1, sizeof(client_thread_t));
 		if (!ct) {
-			fprintf(stderr, "Error allocating space for new client thread\n");
+			perror("Client thread calloc failed");
 			break;
 		}
 		ct->client_fd = client_fd;
@@ -471,7 +448,7 @@ int main (int argc, char *argv[]) {
 	
 		// Adds client to front of list / Ensures no race
 		pthread_mutex_lock(&clients_mutex);
-		if (pthread_create(&ct->thread, NULL, client_thread, ct) == 0) {
+		if (pthread_create(&ct->thread, &client_attr, client_io_thread, ct) == 0) {
                 	ct->next = clients;
                 	clients = ct;
 
@@ -497,7 +474,7 @@ int main (int argc, char *argv[]) {
 	client_thread_t *c = clients;
 	pthread_mutex_lock(&clients_mutex);
 	while (c != NULL) {
-		//send_by_type(c->client_fd, (uint8_t)LOGOUT);
+		//send_by_type(c->client_fd, LOGOUT);
 		c->finished = true;
 		c = c->next;
 	}
@@ -507,7 +484,10 @@ int main (int argc, char *argv[]) {
 	pthread_mutex_unlock(&clients_mutex);
 
 	pthread_join(reaper, NULL);
+
 	pthread_mutex_destroy(&clients_mutex);
-        pthread_cond_destroy(&clients_cond);	
+        pthread_cond_destroy(&clients_cond);
+	pthread_attr_destroy(&client_attr);	
+
 	return 0;
 }

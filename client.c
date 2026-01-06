@@ -19,15 +19,18 @@
 
 #include <raylib.h>
 #include "maps.h"
+#include "anera_net.h"
 
-#define MAX_CONNECTIONS 15
+
+//#define MAX_CONNECTIONS 15
 #define DEFAULT_RAYS 180
 #define FOV 90
 #define MAX_PORT 65535
+//#define DEFAULT_PORT 5555
 
 
 
-
+/*
 // Message type identifier
 typedef enum {
 	LOGIN,
@@ -42,33 +45,35 @@ typedef struct __attribute__((packed)) {
 	char username[32];
 	uint16_t pos_x, pos_y;
 } user_data_t;
-
+*/
 
 // Holds MAX_CONNECTIONS slots of user_data_t. Unused slots store 0 and are ignored
 static user_data_t players[MAX_CONNECTIONS] = {0};
-static volatile sig_atomic_t shutdown_requested = 0;
+static user_data_t client_info = {0};
+static pthread_mutex_t client_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t players_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 typedef struct settings {
-        user_data_t client_info;
-        uint16_t ray_multiplier;
+        int ray_multiplier;
         struct sockaddr_in server;
         int socket_fd;
         atomic_bool connected;
 
 } settings_t;
 
-static pthread_mutex_t settings_mutex = PTHREAD_MUTEX_INITIALIZER;
 static settings_t settings = {0};
+static volatile sig_atomic_t shutdown_requested = 0;
 
 // Default tcp server connection Port / Ip
 void init_def_settings() {
         settings.server.sin_family = AF_INET;
-        settings.server.sin_port = htons(8080);
+        settings.server.sin_port = htons(DEFAULT_PORT);
         inet_pton(AF_INET, "127.0.0.1", &settings.server.sin_addr);
 	
 	atomic_init(&settings.connected, false);
         settings.ray_multiplier = 1;
 }
+
 
 // Parses in-line client arguments
 int parse_args(int argc, char* argv[]) {
@@ -92,8 +97,8 @@ int parse_args(int argc, char* argv[]) {
 				return -1;
 			}
 			
-			strncpy(settings.client_info.username, argv[i], sizeof(settings.client_info.username));
-			settings.client_info.username[31] = '\0';
+			strncpy(client_info.username, argv[i], sizeof(client_info.username));
+			client_info.username[31] = '\0';
 			username_set = true;
 		}
 
@@ -176,64 +181,26 @@ int parse_args(int argc, char* argv[]) {
 	return 0;
 }
 
-// Ensures full read from server --Assumes dynamically allocated users-info---
-int read_from_server(int socket_fd, user_data_t* users_info) {
-	const size_t n = MAX_CONNECTIONS * sizeof(user_data_t);
-	size_t bytes_read = 0;
-	ssize_t result;
-	
-	// Read data for all users
-	while (bytes_read < n) {
-	
-		result = read(socket_fd, 
-			(char*)users_info + bytes_read, 
-			n - bytes_read);
-	
-		// Error while reading
-		if (result < 0) {
-			if (errno == EINTR)
-				continue;
-			return errno;
-		}
-		
-		// EOF signaled; server connection closed
-		else if (result == 0)
-			return EOF;
-			
 
-		bytes_read += result;
-	}
+// Assumes clients mutex unlocked
+int send_by_type(int sock_fd, message_type_t msg_type) {
+	user_data_t msg;
 
-	return 0;
+	pthread_mutex_lock(&client_mutex);
+	memcpy(&msg, &client_info, sizeof(user_data_t));
+	pthread_mutex_unlock(&client_mutex);
+
+	msg.type = (uint8_t)msg_type;
+	return full_write(sock_fd, &msg, 1);
 }
 
-
-// Ensures full write to server
-int write_to_server(int socket_fd, user_data_t* msg) {
-	const size_t n = sizeof(user_data_t);
-	size_t bytes_written = 0;
-	
-	ssize_t result;
-	while (bytes_written < n) {
-		result = write(socket_fd, (char*)msg + bytes_written, n - bytes_written);
-		
-		// Error while writing
-		if (result < 0) {
-			if (errno == EINTR)
-				continue;
-			return errno;
-		}
-
-		bytes_written += result;
-	}
-
-	return 0;
-}
 
 void* recv_thread(void *arg) {
 	while (atomic_load(&settings.connected)) {
 		int result = 0;
-		if ((result = read_from_server(settings.socket_fd, players)) != 0) {
+		user_data_t buf[MAX_CONNECTIONS];
+
+		if ((result = full_read(settings.socket_fd, buf, MAX_CONNECTIONS)) != 0) {
 			if (result == EOF)
 				fprintf(stderr, "EOF reach while reading from server\n");
 			else { 
@@ -246,10 +213,16 @@ void* recv_thread(void *arg) {
 			break;
 		}
 		
+		pthread_mutex_lock(&players_mutex);
+		memcpy(players, buf, sizeof(user_data_t) * MAX_CONNECTIONS);
+		pthread_mutex_unlock(&players_mutex);	
+	
 		message_type_t type = (message_type_t)players[0].type;
 		switch (type) {
 			case LOGOUT:
 				atomic_store(&settings.connected, false);
+				fprintf(stdout, "Disconnected from server");
+				fflush(stdout);
 				break;
 			case CLIENT_UPDATE:
 				break;
@@ -264,12 +237,9 @@ void* recv_thread(void *arg) {
 
 void* send_thread(void *arg) {
 	while (atomic_load(&settings.connected)) {
-		pthread_mutex_lock(&settings_mutex);
-		
-		settings.client_info.type = (uint8_t)SERVER_UPDATE;
-		
+
 		int result = 0;
-		if ((result = write_to_server(settings.socket_fd, &settings.client_info)) != 0) {
+		if ((result = send_by_type(settings.socket_fd, SERVER_UPDATE)) != 0) {
 			atomic_store(&settings.connected, false);
 			
 			char err_buf[128];
@@ -277,7 +247,6 @@ void* send_thread(void *arg) {
                         fprintf(stderr, "Error while writing to server: %s\n", msg);
 		}
 		
-		pthread_mutex_unlock(&settings_mutex);
 	}
 	return NULL;
 }
@@ -285,7 +254,6 @@ void* send_thread(void *arg) {
 // Graceful shutdown on SIGINT SIGTERM SIGHUP
 void shutdown_handler(int signum) {
 	shutdown_requested = 1;
-	close(settings.socket_fd); // Interrupts blocking calls (EX: connect() on full queue)
 }
 
 
@@ -318,7 +286,7 @@ int main(int argc, char* argv[]) {
 		// Error occurred or shutdown requested
 		perror("Failed to connect socket to server");
 		return -1;
-	}
+	}	
 	
 	// Connection successful
 	atomic_store(&settings.connected, true);
@@ -330,13 +298,13 @@ int main(int argc, char* argv[]) {
 	// Thread #2: Receive from server
 	pthread_t recv_tid;
         pthread_create(&recv_tid, NULL, recv_thread, NULL);
+
+	// Login message	
+	send_by_type(settings.socket_fd, LOGIN);
+	
 	// Thread Main: Game loop
-
-	pthread_mutex_lock(&settings_mutex);
-	settings.client_info.type = (uint8_t)LOGIN;
-	write_to_server(settings.socket_fd, &settings.client_info);
-	pthread_mutex_unlock(&settings_mutex);
-
+	fprintf(stdout, "Connected to server\n");
+        fflush(stdout);
 	while (atomic_load(&settings.connected)) {
 		if (shutdown_requested)
 			atomic_store(&settings.connected, false);
@@ -371,17 +339,14 @@ int main(int argc, char* argv[]) {
 	CloseWindow(); */
 		
 	// Sends logout
-	pthread_mutex_lock(&settings_mutex);
 	if (!shutdown_requested) {
-		settings.client_info.type = (uint8_t)LOGOUT;
-		write_to_server(settings.socket_fd, &settings.client_info);
-		close(settings.socket_fd);
+		send_by_type(settings.socket_fd, LOGOUT);		
 	}
-	pthread_mutex_unlock(&settings_mutex);
 
+	close(settings.socket_fd);
 	pthread_join(send_tid, NULL);
         pthread_join(recv_tid, NULL);
-	pthread_mutex_destroy(&settings_mutex);
+	pthread_mutex_destroy(&client_mutex);
 	
 	return 0;
 }
