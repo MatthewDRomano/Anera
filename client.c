@@ -204,9 +204,9 @@ void* recv_thread(void *arg) {
 		message_type_t type = (message_type_t)players[0].type;
 		switch (type) {
 			case LOGOUT:
-				atomic_store(&settings.connected, false);
 				fprintf(stdout, "Disconnected from server");
 				fflush(stdout);
+				atomic_store(&settings.connected, false);
 				break;
 			case CLIENT_UPDATE:
 				break;
@@ -230,14 +230,13 @@ void* send_thread(void *arg) {
                         char *msg = strerror_r(result, err_buf, sizeof(err_buf));
                         fprintf(stderr, "Error while writing to server: %s\n", msg);
 		}
-		fprintf(stdout, "!\n");
-		fflush(stdout);	
+
 		// Wait for at least one signal
 		sem_wait(&send_sem);
-		
+	
+		// Handles if multiple signals	
 		while (sem_trywait(&send_sem) == 0) {
-            		// drain the counter if multiple signals sent
-            		// therefore most recent client info is sent
+            		; /* drain the counter so only most recent client info is sent */
         	}	
 	}
 	return NULL;
@@ -256,6 +255,11 @@ int main(int argc, char* argv[]) {
 	sigaction(SIGINT, &shutdown, NULL);
 	sigaction(SIGTERM, &shutdown, NULL);
 	sigaction(SIGHUP, &shutdown, NULL);
+	
+	// ENSURES the write() within send thread return -1 if server closes
+	struct sigaction sa = {0};
+        sa.sa_handler = SIG_IGN;
+        sigaction(SIGPIPE, &sa, NULL);
 	
 	// Parse in-line arguments and set default settings
 	init_def_settings(); 
@@ -305,7 +309,7 @@ int main(int argc, char* argv[]) {
 		sem_post(&send_sem); // tells send thread client updated
 		sleep(1);		
 	}
-	/*
+	/*	
 	point_t start_pos;
 	start_pos.x = 50;
 	start_pos.y = 50;
@@ -330,18 +334,13 @@ int main(int argc, char* argv[]) {
 		EndDrawing();
 		
 	}
-	CloseWindow(); */
-		
-	// Sends logout
-	if (!shutdown_requested) {
-		send_by_type(settings.socket_fd, LOGOUT);		
-	}
-
+	CloseWindow(); 
+	*/	
 	close(settings.socket_fd);
+	sem_post(&send_sem); // Ends blocking wait in send thread
+
 	pthread_join(send_tid, NULL);
         pthread_join(recv_tid, NULL);
-	pthread_mutex_destroy(&client_mutex);
-	pthread_mutex_destroy(&players_mutex);
 	sem_destroy(&send_sem);	
 	return 0;
 }

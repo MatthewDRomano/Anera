@@ -19,6 +19,7 @@
 #include <time.h>
 
 #include "anera_net.h"
+#include "log.h"
 
 #define MIN_PORT 1024
 #define MAX_PORT 49151
@@ -61,27 +62,6 @@ void init_def_settings() {
 	settings.running = ATOMIC_VAR_INIT(false);
 	settings.max_players = MAX_CONNECTIONS;
 
-}
-
-// Mutex needed because write() to log.txt in different threads. ONLY needed around log() 
-int errlog(int tid, char *call, int fd, int errnum, char *client) {
-        // format Timestamp | tid | method name, fd, errno, strerror, client username
-        FILE* log_f = fopen("log.txt", "a");
-
-	char time[32];
-	struct timespec ts;
-    	struct tm tm;
-	clock_gettime(CLOCK_REALTIME, &ts);
-	gmtime_r(&ts.tv_sec, &tm);
-	strftime(time, sizeof(time), "%Y-%m-%d %H:%M:%S", &tm);
-
-	// start mutex
-	fprintf(log_f, "%s | tid=%d | %s | fd=%d | errno=%d | %s | Client name: %s\n", time, tid, call, fd, errnum, strerror(errno), client);
-	fflush(log_f);	
-	// end log mutex
-	
-	fclose(log_f);
-	return 0;
 }
 
 
@@ -258,7 +238,7 @@ void* client_io_thread(void* arg) {
 					else {
 						char err_buf[128];
                                         	char *msg = strerror_r(result, err_buf, sizeof(err_buf));
-                                        	fprintf(stderr, "Client read error: %s\n", msg);
+						fprintf(stderr, "Client read error: %s\n", msg);
 					}
 					
 					mark_thread_finished(ct);
@@ -346,6 +326,11 @@ int main (int argc, char *argv[]) {
 		perror("Socket creation failed");
 		return -1;
 	}
+
+	// Allows rebind to same port after server termination
+	// regardless if clients in TIME_WAIT or not
+	int opt = 1;
+	setsockopt(settings.socket_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 	
 	// Binds server to socket
 	while (bind(settings.socket_fd, (struct sockaddr*)(&settings.server), sizeof(settings.server)) == -1) {
@@ -381,9 +366,14 @@ int main (int argc, char *argv[]) {
 	pthread_attr_init(&client_attr);
 	if (pthread_attr_setstacksize(&client_attr, CLIENT_STACK) != 0) {
 		fprintf(stderr, "Error setting client thread stack size\n");
-		return -1;
+		raise(SIGTERM);
 	}
 
+	// Error creating error log; treated as catastrophic
+	if (init_log("Anera_server") != 0)
+		raise(SIGTERM);
+	
+	
 	// Server loop
 	while (!shutdown_requested) {
 
@@ -413,7 +403,7 @@ int main (int argc, char *argv[]) {
 			break;
 
 		// Server is full
-		if (atomic_load(&settings.connected_players) == settings.max_players) {
+		if (atomic_load(&settings.connected_players) >= settings.max_players) {
 			send_by_type(client_fd, LOGOUT);
 			close(client_fd);
 			continue;
@@ -425,14 +415,15 @@ int main (int argc, char *argv[]) {
 			perror("Client thread calloc failed");
 			break;
 		}
-		ct->client_fd = client_fd;
 		
 	
 		// Adds client to front of list / Ensures no race
+		// Sets file descriptor; client_io_thread also has mutex protection
 		pthread_mutex_lock(&clients_mutex);
 		if (pthread_create(&ct->thread, &client_attr, client_io_thread, ct) == 0) {
                 	ct->next = clients;
                 	clients = ct;
+			ct->client_fd = client_fd;
 
 			atomic_fetch_add(&settings.connected_players, 1);
 		}	
@@ -449,7 +440,7 @@ int main (int argc, char *argv[]) {
 	
 	// Shutdown requested. Updates running value to false for all threads
 	atomic_store(&settings.running, false);
-	
+	//close(settings.socket_fd);	
 	
 	// Server is closing / finishes all threads for reaper to join
 	// Sends logout message
@@ -467,9 +458,9 @@ int main (int argc, char *argv[]) {
 
 	pthread_join(reaper, NULL);
 
-	pthread_mutex_destroy(&clients_mutex);
         pthread_cond_destroy(&clients_cond);
 	pthread_attr_destroy(&client_attr);	
-
+	
+	end_log();
 	return 0;
 }
