@@ -1,4 +1,4 @@
-#define _GNU_SOURCE // Allows GNU strerror_r
+#include "config.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -369,7 +369,7 @@ int main (int argc, char *argv[]) {
 		raise(SIGTERM);
 	}
 
-	// Error creating error log; treated as catastrophic
+	// Error opening error log; treated as catastrophic
 	if (init_log("Anera_server") != 0)
 		raise(SIGTERM);
 	

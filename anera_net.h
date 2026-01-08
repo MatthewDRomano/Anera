@@ -2,11 +2,6 @@
 #define ANERA_NET_H
 
 #include <stdint.h>	// uint8_t, uint16_t
-#include <unistd.h>	// read, write
-#include <errno.h>	// errno, EINTR
-#include <stddef.h>	// size_t
-#include <unistd.h>	// ssize_t
-#include <stdio.h>	// EOF enum
 
 #define MAX_CONNECTIONS 15
 #define DEFAULT_PORT 5555

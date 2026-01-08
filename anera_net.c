@@ -1,4 +1,9 @@
 #include "anera_net.h"
+#include <unistd.h>     // read, write
+#include <errno.h>      // errno, EINTR
+#include <stddef.h>     // size_t
+#include <unistd.h>     // ssize_t
+#include <stdio.h>      // EOF enum
 
 // Ensures full read
 int full_read(int socket_fd, user_data_t *player_info, int users) {

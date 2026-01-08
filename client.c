@@ -1,4 +1,4 @@
-#define _GNU_SOURCE // Allows GNU strerror_r
+#include "config.h"
 
 #include <stdlib.h>
 #include <stdio.h>
