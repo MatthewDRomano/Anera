@@ -292,18 +292,26 @@ int main(int argc, char* argv[]) {
 
 	// Thread #1: send to server
 	pthread_t send_tid;
-	pthread_create(&send_tid, NULL, send_thread, NULL);
+	if (pthread_create(&send_tid, NULL, send_thread, NULL) != 0) {
+		fprintf(stderr, "Failed to create send thread\n");
+		raise(SIGTERM);
+	}
 	
 	// Thread #2: Receive from server
 	pthread_t recv_tid;
-        pthread_create(&recv_tid, NULL, recv_thread, NULL);
+        if (pthread_create(&recv_tid, NULL, recv_thread, NULL) != 0) {
+		fprintf(stderr, "Failed to receive send thread\n");
+		raise(SIGTERM);
+	}
 
 	// Thread Main: Game loop
 	fprintf(stdout, "Connected to server\n");
         fflush(stdout);
 	while (atomic_load(&settings.connected)) {
-		if (shutdown_requested)
+		if (shutdown_requested) {
 			atomic_store(&settings.connected, false);
+			break;
+		}
 
 
 		sem_post(&send_sem); // tells send thread client updated

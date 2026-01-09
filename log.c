@@ -58,6 +58,12 @@ void end_log() {
 
 int errlog(const char* thread, const char* call, int fd, int errnum, const char* err_desc, const char* client) {
 	pthread_mutex_lock(&log_mutex);
+
+	if (log_f == NULL) {
+		pthread_mutex_unlock(&log_mutex);
+		return -1;
+	}	
+
 	set_time();
 	if (fprintf(log_f, "[%s] | thread: %s | %s | fd=%d | Error: %s -> %s | Client name: %s\n", 
 		    time_s, thread, call, fd, err_desc, strerror(errnum), client) == EOF) {

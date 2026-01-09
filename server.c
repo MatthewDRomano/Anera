@@ -64,6 +64,7 @@ void init_def_settings() {
 
 }
 
+//int send_by_type(int sock_fd, message_type_t msg_type);
 
 int parse_args(int argc, char *argv[]) {
 	
@@ -155,15 +156,18 @@ void* reaper_thread(void *arg) {
 				// Avoids deadlock in other threads if join stalls
 				pthread_mutex_unlock(&clients_mutex);
 				pthread_join(ct->thread, NULL);
+				//send_by_type(ct->client_fd, LOGOUT);//
 				pthread_mutex_lock(&clients_mutex);
 				
 				*pp = ct->next;
 				atomic_fetch_sub(&settings.connected_players, 1);
+				
 				close(ct->client_fd);
 
 				// Prints user disconnected and frees associated memory
 				fprintf(stdout, "%s disconnected\n", ct->net_msg.username);
                                 fflush(stdout);
+				errlog("Reaper", "--DISCONNECT--", -1, -1, "Player dc", ct->net_msg.username);
 				free(ct);	
 			}
 				
@@ -204,11 +208,12 @@ void mark_thread_finished(client_thread_t *ct) {
 }
 
 void* client_io_thread(void* arg) {	
-	client_thread_t *ct = (client_thread_t*)arg;
-	
+	client_thread_t *ct = (client_thread_t*)arg;	
+
 	struct pollfd pfd;
 	
 	pthread_mutex_lock(&clients_mutex);
+	//int dup_fd = dup(ct->client_fd);
 	int locked = true;
 	while (!ct->finished) {
 		pfd.fd = ct->client_fd;
@@ -233,12 +238,15 @@ void* client_io_thread(void* arg) {
 				int result = 0;
 				user_data_t buf;
 				if ((result = full_read(ct->client_fd, &buf, 1)) != 0) {
-					if (result == EOF)
+					if (result == EOF) {
 						fprintf(stderr, "EOF reached on %s\n", buf.username);
+						errlog("Client", "read", ct->client_fd, errno, "Client dc", buf.username);
+					}
 					else {
 						char err_buf[128];
                                         	char *msg = strerror_r(result, err_buf, sizeof(err_buf));
 						fprintf(stderr, "Client read error: %s\n", msg);
+						errlog("Client", "read", ct->client_fd, errno, "N/A", buf.username);
 					}
 					
 					mark_thread_finished(ct);
@@ -252,6 +260,7 @@ void* client_io_thread(void* arg) {
 
 				if ((message_type_t)buf.type == LOGIN) {
 					fprintf(stdout, "%s logged in\n", buf.username);
+					errlog("Client", "--JOIN--", -1, -1, "Player connected", ct->net_msg.username);
 					fflush(stdout);
 				}
 			}
@@ -263,6 +272,7 @@ void* client_io_thread(void* arg) {
 					char err_buf[128];
 					char *msg = strerror_r(result, err_buf, sizeof(err_buf));
 					fprintf(stderr, "Client write error: %s\n", msg);
+					errlog("Client", "write", ct->client_fd, errno, "Player dc", ct->net_msg.username);
 					mark_thread_finished(ct);
 					break;
 				}
@@ -276,6 +286,7 @@ void* client_io_thread(void* arg) {
 		else if (ready < 0)
 			if (errno != EINTR) {
 				perror("Poll failed");
+				errlog("Client", "poll", ct->client_fd, errno, "N/A", ct->net_msg.username);
 				mark_thread_finished(ct);
 				break;
 			}
@@ -413,6 +424,7 @@ int main (int argc, char *argv[]) {
 		client_thread_t *ct = (client_thread_t*)calloc(1, sizeof(client_thread_t));
 		if (!ct) {
 			perror("Client thread calloc failed");
+			errlog("Main", "Calloc", -1, errno, "N/A", "N/A");
 			break;
 		}
 		
@@ -431,6 +443,7 @@ int main (int argc, char *argv[]) {
 		// Failed to create thread			
 		else {
 			fprintf(stderr, "Error creating client thread\n");
+			errlog("Main", "pthread_create", ct->client_fd, errno, "N/A", "N/A");
 			close(client_fd);
                         free(ct);
 		}
