@@ -180,11 +180,15 @@ int send_by_type(int sock_fd, message_type_t msg_type) {
 
 
 void* recv_thread(void *arg) {
+	pthread_mutex_lock(&client_mutex);
+	int io_fd = dup(settings.socket_fd);
+	pthread_mutex_unlock(&client_mutex);
+	
 	while (atomic_load(&settings.connected)) {
 		int result = 0;
 		user_data_t buf[MAX_CONNECTIONS];
 
-		if ((result = full_read(settings.socket_fd, buf, MAX_CONNECTIONS)) != 0) {
+		if ((result = full_read(io_fd, buf, MAX_CONNECTIONS)) != 0) {
 			if (result == EOF)
 				fprintf(stderr, "EOF reach while reading from server\n");
 			else { 
@@ -207,6 +211,7 @@ void* recv_thread(void *arg) {
 				fprintf(stdout, "Disconnected from server");
 				fflush(stdout);
 				atomic_store(&settings.connected, false);
+				shutdown(io_fd, SHUT_RDWR);
 				break;
 			case CLIENT_UPDATE:
 				break;
@@ -216,14 +221,21 @@ void* recv_thread(void *arg) {
 				break;
 		}
 	}	
+
+	close(io_fd);
 	return NULL;
 }
 
 void* send_thread(void *arg) {
+	// Dupped fd to avoid reuse bugs
+	pthread_mutex_lock(&client_mutex);
+        int io_fd = dup(settings.socket_fd);
+        pthread_mutex_unlock(&client_mutex);
+	
 	while (atomic_load(&settings.connected)) {
 		
 		int result = 0;
-		if ((result = send_by_type(settings.socket_fd, SERVER_UPDATE)) != 0) {
+		if ((result = send_by_type(io_fd, SERVER_UPDATE)) != 0) {
 			atomic_store(&settings.connected, false);
 			
 			char err_buf[128];
@@ -239,12 +251,15 @@ void* send_thread(void *arg) {
             		; /* drain the counter so only most recent client info is sent */
         	}	
 	}
+	shutdown(io_fd, SHUT_RDWR);
+	close(io_fd);
 	return NULL;
 }
 
 // Graceful shutdown on SIGINT SIGTERM SIGHUP
 void shutdown_handler(int signum) {
 	shutdown_requested = 1;
+	shutdown(settings.socket_fd, SHUT_RDWR);
 }
 
 

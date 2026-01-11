@@ -29,7 +29,7 @@ typedef struct client_thread {
 	pthread_t thread;
 	int client_fd;
 	user_data_t net_msg;
-	bool finished;
+	atomic_bool finished;
 	
 	struct client_thread *next;
 } client_thread_t;
@@ -127,7 +127,7 @@ int parse_args(int argc, char *argv[]) {
 bool has_dead_clients() {
 	client_thread_t *ct = clients;
 	while (ct != NULL) {
-		if (ct->finished)
+		if (atomic_load(&ct->finished))
 			return true;
 		ct = ct->next;
 	}
@@ -152,7 +152,7 @@ void* reaper_thread(void *arg) {
 		while (*pp != NULL) {
 			client_thread_t *ct = *pp;
 			
-			if (ct->finished) {
+			if (atomic_load(&ct->finished)) {
 				// Avoids deadlock in other threads if join stalls
 				pthread_mutex_unlock(&clients_mutex);
 				pthread_join(ct->thread, NULL);
@@ -161,9 +161,10 @@ void* reaper_thread(void *arg) {
 				
 				*pp = ct->next;
 				atomic_fetch_sub(&settings.connected_players, 1);
-				
+			
+				shutdown(ct->client_fd, SHUT_RDWR);	
 				close(ct->client_fd);
-
+	
 				// Prints user disconnected and frees associated memory
 				fprintf(stdout, "%s disconnected\n", ct->net_msg.username);
                                 fflush(stdout);
@@ -200,12 +201,14 @@ int send_by_type(int sock_fd, message_type_t msg_type) {
 	return full_write(sock_fd, msg, MAX_CONNECTIONS);
 }
 
+/*
 // Safely marks thread ready to be reaped
 void mark_thread_finished(client_thread_t *ct) {
 	pthread_mutex_lock(&clients_mutex);
 	ct->finished = true;
 	pthread_mutex_unlock(&clients_mutex);
 }
+*/
 
 void* client_io_thread(void* arg) {	
 	client_thread_t *ct = (client_thread_t*)arg;	
@@ -213,23 +216,21 @@ void* client_io_thread(void* arg) {
 	struct pollfd pfd;
 	
 	pthread_mutex_lock(&clients_mutex);
-	//int dup_fd = dup(ct->client_fd);
-	int locked = true;
-	while (!ct->finished) {
-		pfd.fd = ct->client_fd;
+	int io_fd = dup(ct->client_fd);
+	pthread_mutex_unlock(&clients_mutex);
+
+	while (!atomic_load(&ct->finished)) {
+		pfd.fd = io_fd;
         	pfd.events = POLLIN | POLLOUT;
 		
-		pthread_mutex_unlock(&clients_mutex);
-		locked = false;
-
 		
-		int ready = poll(&pfd, 1, 100); // Waits 100 ms
+		int ready = poll(&pfd, 1, -1); // Waits indiefinitely (-1)
 
 		if (ready > 0) {
 			
 			if (pfd.revents & (POLLHUP | POLLERR)) {
-				send_by_type(ct->client_fd, LOGOUT);
-				mark_thread_finished(ct);
+				send_by_type(io_fd, LOGOUT);
+				atomic_store(&ct->finished, true);
 				break;
                         }
 			
@@ -237,19 +238,19 @@ void* client_io_thread(void* arg) {
 			if (pfd.revents & POLLIN) {
 				int result = 0;
 				user_data_t buf;
-				if ((result = full_read(ct->client_fd, &buf, 1)) != 0) {
+				if ((result = full_read(io_fd, &buf, 1)) != 0) {
 					if (result == EOF) {
 						fprintf(stderr, "EOF reached on %s\n", buf.username);
-						errlog("Client", "read", ct->client_fd, errno, "Client dc", buf.username);
+						errlog("Client", "read", io_fd, errno, "Client dc", buf.username);
 					}
 					else {
 						char err_buf[128];
                                         	char *msg = strerror_r(result, err_buf, sizeof(err_buf));
 						fprintf(stderr, "Client read error: %s\n", msg);
-						errlog("Client", "read", ct->client_fd, errno, "N/A", buf.username);
+						errlog("Client", "read", io_fd, errno, "N/A", buf.username);
 					}
 					
-					mark_thread_finished(ct);
+					atomic_store(&ct->finished, true);
 					break;
 				}
 				
@@ -268,12 +269,12 @@ void* client_io_thread(void* arg) {
 			// Writes to client
 			if (pfd.revents & POLLOUT) {
 				int result = 0;
-				if ((result = send_by_type(ct->client_fd, CLIENT_UPDATE)) != 0) {
+				if ((result = send_by_type(io_fd, CLIENT_UPDATE)) != 0) {
 					char err_buf[128];
 					char *msg = strerror_r(result, err_buf, sizeof(err_buf));
 					fprintf(stderr, "Client write error: %s\n", msg);
-					errlog("Client", "write", ct->client_fd, errno, "Player dc", ct->net_msg.username);
-					mark_thread_finished(ct);
+					errlog("Client", "write", io_fd, errno, "Player dc", ct->net_msg.username);
+					atomic_store(&ct->finished, true);
 					break;
 				}
 			}
@@ -286,18 +287,16 @@ void* client_io_thread(void* arg) {
 		else if (ready < 0)
 			if (errno != EINTR) {
 				perror("Poll failed");
-				errlog("Client", "poll", ct->client_fd, errno, "N/A", ct->net_msg.username);
-				mark_thread_finished(ct);
+				errlog("Client", "poll", io_fd, errno, "N/A", ct->net_msg.username);
+				atomic_store(&ct->finished, true);
 				break;
 			}
 	
-		pthread_mutex_lock(&clients_mutex);
-		locked = true;
 	}
 	
-	if (!locked) 
-		pthread_mutex_lock(&clients_mutex);
-
+	close(io_fd);
+	
+	pthread_mutex_lock(&clients_mutex);
 	pthread_cond_broadcast(&clients_cond);
 	pthread_mutex_unlock(&clients_mutex);	
 
@@ -323,6 +322,9 @@ int main (int argc, char *argv[]) {
 	struct sigaction sa = {0};
 	sa.sa_handler = SIG_IGN;
 	sigaction(SIGHUP, &sa, NULL);
+
+	// Ignore SIGPIPE
+	signal(SIGPIPE, SIG_IGN);
 
 	// Sets default settings
 	init_def_settings();
@@ -426,7 +428,7 @@ int main (int argc, char *argv[]) {
 			perror("Client thread calloc failed");
 			errlog("Main", "Calloc", -1, errno, "N/A", "N/A");
 			break;
-		}
+	}
 		
 	
 		// Adds client to front of list / Ensures no race
@@ -436,7 +438,8 @@ int main (int argc, char *argv[]) {
                 	ct->next = clients;
                 	clients = ct;
 			ct->client_fd = client_fd;
-
+			
+			ct->finished = ATOMIC_VAR_INIT(false);
 			atomic_fetch_add(&settings.connected_players, 1);
 		}	
 		
@@ -461,7 +464,8 @@ int main (int argc, char *argv[]) {
 	pthread_mutex_lock(&clients_mutex);
 	while (c != NULL) {
 		//send_by_type(c->client_fd, LOGOUT);
-		c->finished = true;
+		atomic_store(&c->finished, true);
+		//c->finished = true;
 		c = c->next;
 	}
 
