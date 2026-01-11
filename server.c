@@ -16,6 +16,7 @@
 #include <pthread.h>
 #include <poll.h>
 #include <stdatomic.h>
+#include <semaphore.h>
 #include <time.h>
 
 #include "anera_net.h"
@@ -36,7 +37,8 @@ typedef struct client_thread {
 
 static client_thread_t *clients = NULL;
 static pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t clients_cond = PTHREAD_COND_INITIALIZER;
+//static pthread_cond_t clients_cond = PTHREAD_COND_INITIALIZER;//
+static sem_t cleanup_sem;
 
 
 typedef struct {
@@ -141,12 +143,16 @@ void* reaper_thread(void *arg) {
 	
 		// Ignores spurious wake ups	
 		while (!has_dead_clients()) {
-			pthread_cond_wait(&clients_cond, &clients_mutex);
+			//pthread_cond_wait(&clients_cond, &clients_mutex);
+			sem_wait(&cleanup_sem);
 			// Ensures reaper does not infinitely sleep upon shutdown with no clients
 			if (!atomic_load(&settings.running) && atomic_load(&settings.connected_players) == 0)
 				break;
 		}
-
+		
+		while (sem_trywait(&cleanup_sem) == 0) { // sem_trywait returns 0 if successful decrement
+			; // Drains cleanup_sem to 0; Only one iteration is needed to remove ALL dead clients
+		}
 
 		client_thread_t **pp = &clients;
 		while (*pp != NULL) {
@@ -159,17 +165,21 @@ void* reaper_thread(void *arg) {
 				//send_by_type(ct->client_fd, LOGOUT);//
 				pthread_mutex_lock(&clients_mutex);
 				
+				// Removes client from clients list
 				*pp = ct->next;
-				atomic_fetch_sub(&settings.connected_players, 1);
-			
+
+				// Closes connection / fd
 				shutdown(ct->client_fd, SHUT_RDWR);	
 				close(ct->client_fd);
 	
-				// Prints user disconnected and frees associated memory
+				// Prints user disconnected
 				fprintf(stdout, "%s disconnected\n", ct->net_msg.username);
                                 fflush(stdout);
 				errlog("Reaper", "--DISCONNECT--", -1, -1, "Player dc", ct->net_msg.username);
-				free(ct);	
+				
+				// Frees memory and updates connected player count
+				free(ct);
+				atomic_fetch_sub(&settings.connected_players, 1);	
 			}
 				
 			else
@@ -295,10 +305,12 @@ void* client_io_thread(void* arg) {
 	}
 	
 	close(io_fd);
-	
+        /*	
 	pthread_mutex_lock(&clients_mutex);
 	pthread_cond_broadcast(&clients_cond);
 	pthread_mutex_unlock(&clients_mutex);	
+	*/
+	sem_post(&cleanup_sem);
 
 	return NULL;
 }
@@ -318,13 +330,13 @@ int main (int argc, char *argv[]) {
 	sigaction(SIGINT, &shutdown, NULL);
 	sigaction(SIGTERM, &shutdown, NULL);
 
+	struct sigaction ign = {0};
+	ign.sa_handler = SIG_IGN;
 	// Ensures Server stays open if terminal session closes
-	struct sigaction sa = {0};
-	sa.sa_handler = SIG_IGN;
-	sigaction(SIGHUP, &sa, NULL);
+	sigaction(SIGHUP, &ign, NULL);
+	// Ensures failed write() sets errno EPIPE and returns -1 instead of crashing with SIGPIPE
+	sigaction(SIGPIPE, &ign, NULL);
 
-	// Ignore SIGPIPE
-	signal(SIGPIPE, SIG_IGN);
 
 	// Sets default settings
 	init_def_settings();
@@ -368,6 +380,7 @@ int main (int argc, char *argv[]) {
 	fflush(stdout);
 
 	// Spawns reaper thread to cleanup dead client threads
+	sem_init(&cleanup_sem, 0, 0);
 	pthread_t reaper;
 	if (pthread_create(&reaper, NULL, reaper_thread, NULL) != 0) {
 		perror("Failed to spawn reaper thread");
@@ -465,17 +478,18 @@ int main (int argc, char *argv[]) {
 	while (c != NULL) {
 		//send_by_type(c->client_fd, LOGOUT);
 		atomic_store(&c->finished, true);
-		//c->finished = true;
 		c = c->next;
 	}
 
 	// Wakes up reaper if sleeping; ready to join
-	pthread_cond_broadcast(&clients_cond);
+	//pthread_cond_broadcast(&clients_cond);
 	pthread_mutex_unlock(&clients_mutex);
+	sem_post(&cleanup_sem);
 
 	pthread_join(reaper, NULL);
 
-        pthread_cond_destroy(&clients_cond);
+        //pthread_cond_destroy(&clients_cond);
+	sem_destroy(&cleanup_sem);
 	pthread_attr_destroy(&client_attr);	
 	
 	end_log();

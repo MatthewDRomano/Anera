@@ -306,6 +306,7 @@ int main(int argc, char* argv[]) {
         send_by_type(settings.socket_fd, LOGIN);
 
 	// Thread #1: send to server
+	sem_init(&send_sem, 0, 0);
 	pthread_t send_tid;
 	if (pthread_create(&send_tid, NULL, send_thread, NULL) != 0) {
 		fprintf(stderr, "Failed to create send thread\n");
