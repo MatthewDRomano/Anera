@@ -1,0 +1,4 @@
+# =====      Ignore all logs      =====
+# ===== Clean slate stored in git =====
+
+*.txt

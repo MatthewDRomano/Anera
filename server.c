@@ -66,7 +66,6 @@ void init_def_settings() {
 
 }
 
-//int send_by_type(int sock_fd, message_type_t msg_type);
 
 int parse_args(int argc, char *argv[]) {
 	
@@ -125,21 +124,26 @@ int parse_args(int argc, char *argv[]) {
 }
 
 
-// Checks for finished clients to remove / assumes mutex locked
+// Checks for finished clients to remove / needs mutex
 bool has_dead_clients() {
+	pthread_mutex_lock(&clients_mutex);
 	client_thread_t *ct = clients;
 	while (ct != NULL) {
-		if (atomic_load(&ct->finished))
+		if (atomic_load(&ct->finished)) {
+			pthread_mutex_unlock(&clients_mutex);
 			return true;
+		}
 		ct = ct->next;
 	}
+	
+	pthread_mutex_unlock(&clients_mutex);
 	return false;
 }
 
 void* reaper_thread(void *arg) {
 	
 	while(atomic_load(&settings.running)) {
-		pthread_mutex_lock(&clients_mutex);
+		//pthread_mutex_lock(&clients_mutex);
 	
 		// Ignores spurious wake ups	
 		while (!has_dead_clients()) {
@@ -154,6 +158,7 @@ void* reaper_thread(void *arg) {
 			; // Drains cleanup_sem to 0; Only one iteration is needed to remove ALL dead clients
 		}
 
+		pthread_mutex_lock(&clients_mutex);
 		client_thread_t **pp = &clients;
 		while (*pp != NULL) {
 			client_thread_t *ct = *pp;

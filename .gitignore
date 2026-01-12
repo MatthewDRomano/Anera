@@ -1,0 +1,22 @@
+# ===== C / Build Artifacts =====
+*.o
+*.obj
+*.so
+*.exe
+*.out
+*.a
+*.dll
+*.dylib
+*.log
+*.tmp
+*.bak
+*.swpi
+
+
+
+# ===== Dev / Compiled files =====
+
+*.txt
+server
+client
+
