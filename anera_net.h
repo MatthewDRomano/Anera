@@ -6,6 +6,10 @@
 #define MAX_CONNECTIONS 15
 #define DEFAULT_PORT 5555
 
+// Bounded Server->Client data transfer rate (every __ ms)
+#define NETWORK_TRANSFER_PERIOD 25
+
+
 // Message type identifier
 typedef enum {
 	LOGIN,

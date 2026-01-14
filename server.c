@@ -37,7 +37,6 @@ typedef struct client_thread {
 
 static client_thread_t *clients = NULL;
 static pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
-//static pthread_cond_t clients_cond = PTHREAD_COND_INITIALIZER;//
 static sem_t cleanup_sem;
 
 
@@ -140,15 +139,34 @@ bool has_dead_clients() {
 	return false;
 }
 
+
+// Removes client from clients pointer list / frees calloced data
+// Assumes clients mutex is locked upon call
+void cleanup_client(client_thread_t* ct) {
+
+	// Avoids deadlock in other threads if join stalls
+        pthread_mutex_unlock(&clients_mutex);
+        pthread_join(ct->thread, NULL);
+        pthread_mutex_lock(&clients_mutex);
+
+	// Closes connection / fd
+        shutdown(ct->client_fd, SHUT_RDWR);
+        close(ct->client_fd);
+
+        // Frees associated memory
+        free(ct);
+}
+
+
+// Handles cleaning up client_thread_t resources when set to finished
 void* reaper_thread(void *arg) {
 	
 	while(atomic_load(&settings.running)) {
-		//pthread_mutex_lock(&clients_mutex);
 	
 		// Ignores spurious wake ups	
 		while (!has_dead_clients()) {
-			//pthread_cond_wait(&clients_cond, &clients_mutex);
 			sem_wait(&cleanup_sem);
+
 			// Ensures reaper does not infinitely sleep upon shutdown with no clients
 			if (!atomic_load(&settings.running) && atomic_load(&settings.connected_players) == 0)
 				break;
@@ -164,26 +182,18 @@ void* reaper_thread(void *arg) {
 			client_thread_t *ct = *pp;
 			
 			if (atomic_load(&ct->finished)) {
-				// Avoids deadlock in other threads if join stalls
-				pthread_mutex_unlock(&clients_mutex);
-				pthread_join(ct->thread, NULL);
-				//send_by_type(ct->client_fd, LOGOUT);//
-				pthread_mutex_lock(&clients_mutex);
-				
 				// Removes client from clients list
 				*pp = ct->next;
-
-				// Closes connection / fd
-				shutdown(ct->client_fd, SHUT_RDWR);	
-				close(ct->client_fd);
 	
 				// Prints user disconnected
-				fprintf(stdout, "%s disconnected\n", ct->net_msg.username);
+                                fprintf(stdout, "%s disconnected\n", ct->net_msg.username);
                                 fflush(stdout);
-				errlog("Reaper", "--DISCONNECT--", -1, -1, "Player dc", ct->net_msg.username);
+                                errlog("Reaper", "--DISCONNECT--", -1, -1, "Player dc", ct->net_msg.username);
 				
-				// Frees memory and updates connected player count
-				free(ct);
+				// Closes client connection and frees associated client_thread_t data
+				cleanup_client(ct);
+	
+				// Updates global connected_players counter	
 				atomic_fetch_sub(&settings.connected_players, 1);	
 			}
 				
@@ -216,30 +226,42 @@ int send_by_type(int sock_fd, message_type_t msg_type) {
 	return full_write(sock_fd, msg, MAX_CONNECTIONS);
 }
 
-/*
-// Safely marks thread ready to be reaped
-void mark_thread_finished(client_thread_t *ct) {
-	pthread_mutex_lock(&clients_mutex);
-	ct->finished = true;
-	pthread_mutex_unlock(&clients_mutex);
+// Returns current ms
+uint64_t now_ms() {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+		
+	// Sec / ns conversion
+	return (uint64_t)ts.tv_sec * 1000
+		+ ts.tv_nsec / 1000000;
 }
-*/
 
+
+// Performs IO with client
 void* client_io_thread(void* arg) {	
 	client_thread_t *ct = (client_thread_t*)arg;	
 
 	struct pollfd pfd;
+
+	/* 
+	 * Duplicates client socket file descriptor.   
+	 * Ensures when connection is closed, read/write 
+	 * does not persist to potential new socket assigned to client_fd
+	*/
 	
 	pthread_mutex_lock(&clients_mutex);
 	int io_fd = dup(ct->client_fd);
 	pthread_mutex_unlock(&clients_mutex);
 
+	// ms timestamp of last write to client
+	uint64_t last_send_time = now_ms();
+
 	while (!atomic_load(&ct->finished)) {
 		pfd.fd = io_fd;
         	pfd.events = POLLIN | POLLOUT;
 		
-		
-		int ready = poll(&pfd, 1, -1); // Waits indiefinitely (-1)
+		// Waits indiefinitely for ability to read / write to client socket
+		int ready = poll(&pfd, 1, -1); 
 
 		if (ready > 0) {
 			
@@ -283,6 +305,14 @@ void* client_io_thread(void* arg) {
 		
 			// Writes to client
 			if (pfd.revents & POLLOUT) {
+				// Fixed transfer period 
+				// NETWORK_TRANSFER_PERIOD defined in anera_net.h 
+				if (now_ms() - last_send_time < NETWORK_TRANSFER_PERIOD)
+					continue;
+		
+				else
+					last_send_time = now_ms();
+
 				int result = 0;
 				if ((result = send_by_type(io_fd, CLIENT_UPDATE)) != 0) {
 					char err_buf[128];
@@ -310,11 +340,6 @@ void* client_io_thread(void* arg) {
 	}
 	
 	close(io_fd);
-        /*	
-	pthread_mutex_lock(&clients_mutex);
-	pthread_cond_broadcast(&clients_cond);
-	pthread_mutex_unlock(&clients_mutex);	
-	*/
 	sem_post(&cleanup_sem);
 
 	return NULL;
@@ -408,11 +433,6 @@ int main (int argc, char *argv[]) {
 	// Server loop
 	while (!shutdown_requested) {
 
-		/*if (atomic_load(&settings.connected_players) >= settings.max_players) {
-			sleep(1); // Avoids constant CPU use
-			continue;
-		}*/
-
 		struct sockaddr_in new_client;
 		socklen_t adderlen = sizeof(new_client);
 		int client_fd;
@@ -446,7 +466,7 @@ int main (int argc, char *argv[]) {
 			perror("Client thread calloc failed");
 			errlog("Main", "Calloc", -1, errno, "N/A", "N/A");
 			break;
-	}
+		}
 		
 	
 		// Adds client to front of list / Ensures no race
@@ -459,22 +479,22 @@ int main (int argc, char *argv[]) {
 			
 			ct->finished = ATOMIC_VAR_INIT(false);
 			atomic_fetch_add(&settings.connected_players, 1);
-		}	
+			pthread_mutex_unlock(&clients_mutex);
+		}
 		
 		// Failed to create thread			
 		else {
+			pthread_mutex_unlock(&clients_mutex);
 			fprintf(stderr, "Error creating client thread\n");
 			errlog("Main", "pthread_create", ct->client_fd, errno, "N/A", "N/A");
 			close(client_fd);
                         free(ct);
 		}
 
-		pthread_mutex_unlock(&clients_mutex);
 	}
 	
 	// Shutdown requested. Updates running value to false for all threads
 	atomic_store(&settings.running, false);
-	//close(settings.socket_fd);	
 	
 	// Server is closing / finishes all threads for reaper to join
 	// Sends logout message
@@ -487,13 +507,11 @@ int main (int argc, char *argv[]) {
 	}
 
 	// Wakes up reaper if sleeping; ready to join
-	//pthread_cond_broadcast(&clients_cond);
 	pthread_mutex_unlock(&clients_mutex);
 	sem_post(&cleanup_sem);
 
 	pthread_join(reaper, NULL);
 
-        //pthread_cond_destroy(&clients_cond);
 	sem_destroy(&cleanup_sem);
 	pthread_attr_destroy(&client_attr);	
 	

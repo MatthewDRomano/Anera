@@ -10,7 +10,15 @@ int init_log(char* log_name);
 // Must call after joining threads
 void end_log();
 
-// Logs an error entry
+/* 
+ * Logs an error entry
+ * thread   -> thread name
+ * call     -> function that produced error
+ * fd 	    -> file descriptor num
+ * errnum   -> errno value
+ * err_desc -> string describing error
+ * client   -> client name
+*/
 int errlog(const char* thread, 
 	   const char* call, 
 	   int fd, 
