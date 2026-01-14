@@ -17,6 +17,7 @@
 #include <poll.h>
 #include <stdatomic.h>
 #include <semaphore.h>
+#include <fcntl.h>
 #include <time.h>
 
 #include "anera_net.h"
@@ -37,7 +38,7 @@ typedef struct client_thread {
 
 static client_thread_t *clients = NULL;
 static pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
-static sem_t cleanup_sem;
+static sem_t* cleanup_sem;
 
 
 typedef struct {
@@ -165,14 +166,14 @@ void* reaper_thread(void *arg) {
 	
 		// Ignores spurious wake ups	
 		while (!has_dead_clients()) {
-			sem_wait(&cleanup_sem);
+			sem_wait(cleanup_sem);
 
 			// Ensures reaper does not infinitely sleep upon shutdown with no clients
 			if (!atomic_load(&settings.running) && atomic_load(&settings.connected_players) == 0)
 				break;
 		}
 		
-		while (sem_trywait(&cleanup_sem) == 0) { // sem_trywait returns 0 if successful decrement
+		while (sem_trywait(cleanup_sem) == 0) { // sem_trywait returns 0 if successful decrement
 			; // Drains cleanup_sem to 0; Only one iteration is needed to remove ALL dead clients
 		}
 
@@ -186,8 +187,6 @@ void* reaper_thread(void *arg) {
 				*pp = ct->next;
 	
 				// Prints user disconnected
-                                fprintf(stdout, "%s disconnected\n", ct->net_msg.username);
-                                fflush(stdout);
                                 errlog("Reaper", "--DISCONNECT--", -1, -1, "Player dc", ct->net_msg.username);
 				
 				// Closes client connection and frees associated client_thread_t data
@@ -276,16 +275,12 @@ void* client_io_thread(void* arg) {
 				int result = 0;
 				user_data_t buf;
 				if ((result = full_read(io_fd, &buf, 1)) != 0) {
-					if (result == EOF) {
-						fprintf(stderr, "EOF reached on %s\n", buf.username);
-						errlog("Client", "read", io_fd, errno, "Client dc", buf.username);
-					}
-					else {
-						char err_buf[128];
-                                        	char *msg = strerror_r(result, err_buf, sizeof(err_buf));
-						fprintf(stderr, "Client read error: %s\n", msg);
-						errlog("Client", "read", io_fd, errno, "N/A", buf.username);
-					}
+					if (result == EOF) 
+						errlog("Client", "read", io_fd, -1, "Player dc (EOF)", buf.username);
+					
+					else 
+						errlog("Client", "read", io_fd, result, "N/A", buf.username);
+					
 					
 					atomic_store(&ct->finished, true);
 					break;
@@ -296,11 +291,9 @@ void* client_io_thread(void* arg) {
 				pthread_mutex_unlock(&clients_mutex);
 				
 
-				if ((message_type_t)buf.type == LOGIN) {
-					fprintf(stdout, "%s logged in\n", buf.username);
-					errlog("Client", "--JOIN--", -1, -1, "Player connected", ct->net_msg.username);
-					fflush(stdout);
-				}
+				if ((message_type_t)buf.type == LOGIN) 
+					errlog("Client", "--JOIN--", -1, -1, "Player connected", buf.username);
+			
 			}
 		
 			// Writes to client
@@ -315,10 +308,7 @@ void* client_io_thread(void* arg) {
 
 				int result = 0;
 				if ((result = send_by_type(io_fd, CLIENT_UPDATE)) != 0) {
-					char err_buf[128];
-					char *msg = strerror_r(result, err_buf, sizeof(err_buf));
-					fprintf(stderr, "Client write error: %s\n", msg);
-					errlog("Client", "write", io_fd, errno, "Player dc", ct->net_msg.username);
+					errlog("Client", "write", io_fd, result, "Player dc", ct->net_msg.username);
 					atomic_store(&ct->finished, true);
 					break;
 				}
@@ -331,7 +321,6 @@ void* client_io_thread(void* arg) {
 		// Error occurred during poll()
 		else if (ready < 0)
 			if (errno != EINTR) {
-				perror("Poll failed");
 				errlog("Client", "poll", io_fd, errno, "N/A", ct->net_msg.username);
 				atomic_store(&ct->finished, true);
 				break;
@@ -340,7 +329,7 @@ void* client_io_thread(void* arg) {
 	}
 	
 	close(io_fd);
-	sem_post(&cleanup_sem);
+	sem_post(cleanup_sem);
 
 	return NULL;
 }
@@ -409,8 +398,9 @@ int main (int argc, char *argv[]) {
 	fprintf(stdout, "Max players: %d\n", settings.max_players);
 	fflush(stdout);
 
+	// Creates semaphore w/ owner read / write, otherwise read only
+	cleanup_sem = sem_open("/cleanup_sem", O_CREAT, 0644, 1);
 	// Spawns reaper thread to cleanup dead client threads
-	sem_init(&cleanup_sem, 0, 0);
 	pthread_t reaper;
 	if (pthread_create(&reaper, NULL, reaper_thread, NULL) != 0) {
 		perror("Failed to spawn reaper thread");
@@ -463,7 +453,6 @@ int main (int argc, char *argv[]) {
 		// Create new client once accepted
 		client_thread_t *ct = (client_thread_t*)calloc(1, sizeof(client_thread_t));
 		if (!ct) {
-			perror("Client thread calloc failed");
 			errlog("Main", "Calloc", -1, errno, "N/A", "N/A");
 			break;
 		}
@@ -485,7 +474,6 @@ int main (int argc, char *argv[]) {
 		// Failed to create thread			
 		else {
 			pthread_mutex_unlock(&clients_mutex);
-			fprintf(stderr, "Error creating client thread\n");
 			errlog("Main", "pthread_create", ct->client_fd, errno, "N/A", "N/A");
 			close(client_fd);
                         free(ct);
@@ -508,11 +496,11 @@ int main (int argc, char *argv[]) {
 
 	// Wakes up reaper if sleeping; ready to join
 	pthread_mutex_unlock(&clients_mutex);
-	sem_post(&cleanup_sem);
-
+	
+	sem_post(cleanup_sem);
 	pthread_join(reaper, NULL);
 
-	sem_destroy(&cleanup_sem);
+	sem_close(cleanup_sem);
 	pthread_attr_destroy(&client_attr);	
 	
 	end_log();
