@@ -27,9 +27,13 @@ static void set_time() {
 }
 
 int init_log(char* log_name) {
-	// Log already initialized	
-	if (log_f != NULL)
-		return 0;
+	// Log already initialized
+	pthread_mutex_lock(&log_mutex);	
+	if (log_f != NULL) {
+		pthread_mutex_unlock(&log_mutex);
+		return -1;
+	}
+	pthread_mutex_unlock(&log_mutex);
 
 	char name[32] = {0};
 	memcpy(name, log_name, sizeof(name) - 1);
@@ -47,18 +51,23 @@ int init_log(char* log_name) {
 	return 0;
 }
 
-void end_log() {
+int end_log() {
 	// Ignore end request; Already ended or never initialized
-	if (log_f == NULL)
-		return;
+	pthread_mutex_lock(&log_mutex);
+	if (log_f == NULL) {
+		pthread_mutex_unlock(&log_mutex);
+		return -1;
+	}
 
 	fclose(log_f);
 	log_f = NULL;
+	pthread_mutex_unlock(&log_mutex);
+	
+	return 0;
 }
 
 int errlog(const char* thread, const char* call, int fd, int errnum, const char* err_desc, const char* client) {
 	pthread_mutex_lock(&log_mutex);
-
 	if (log_f == NULL) {
 		pthread_mutex_unlock(&log_mutex);
 		return -1;
@@ -71,6 +80,7 @@ int errlog(const char* thread, const char* call, int fd, int errnum, const char*
 		pthread_mutex_unlock(&log_mutex);
 		return -1;
 	}
+
 	fflush(log_f);
 	pthread_mutex_unlock(&log_mutex);
 	return 0;

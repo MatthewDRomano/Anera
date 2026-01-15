@@ -400,6 +400,7 @@ int main (int argc, char *argv[]) {
 
 	// Creates semaphore w/ owner read / write, otherwise read only
 	cleanup_sem = sem_open("/cleanup_sem", O_CREAT, 0644, 1);
+
 	// Spawns reaper thread to cleanup dead client threads
 	pthread_t reaper;
 	if (pthread_create(&reaper, NULL, reaper_thread, NULL) != 0) {
@@ -454,6 +455,7 @@ int main (int argc, char *argv[]) {
 		client_thread_t *ct = (client_thread_t*)calloc(1, sizeof(client_thread_t));
 		if (!ct) {
 			errlog("Main", "Calloc", -1, errno, "N/A", "N/A");
+			close(client_fd);
 			break;
 		}
 		

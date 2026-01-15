@@ -3,12 +3,10 @@
 
 
 // Creates new log specific to server instance
-// Must call before multithreading
 int init_log(char* log_name);
 
 // Closes file descriptor to log upon shutdown
-// Must call after joining threads
-void end_log();
+int end_log();
 
 /* 
  * Logs an error entry
