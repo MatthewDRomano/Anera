@@ -1,4 +1,4 @@
-#include "config.h"
+//#include "config.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -21,6 +21,7 @@
 //#include <raylib.h>
 #include "maps.h"
 #include "anera_net.h"
+#include "log.h"
 
 
 #define DEFAULT_RAYS 180
@@ -192,9 +193,10 @@ void* recv_thread(void *arg) {
 			if (result == EOF)
 				fprintf(stderr, "EOF reach while reading from server\n");
 			else { 
-				char err_buf[128];
-                                char *msg = strerror_r(result, err_buf, sizeof(err_buf));
-                                fprintf(stderr, "Error reading from server: %s\n", msg);
+				//char err_buf[128];
+                                //char *msg = strerror_r(result, err_buf, sizeof(err_buf));
+                                //fprintf(stderr, "Error reading from server: %s\n", msg);
+				errlog("Recv", "read", -1, result, "N/A", client_info.username);
 			}
 
 			atomic_store(&settings.connected, false);	
@@ -238,11 +240,12 @@ void* send_thread(void *arg) {
 		if ((result = send_by_type(io_fd, SERVER_UPDATE)) != 0) {
 			atomic_store(&settings.connected, false);
 			
-			char err_buf[128];
-                        char *msg = strerror_r(result, err_buf, sizeof(err_buf));
-                        fprintf(stderr, "Error while writing to server: %s\n", msg);
+			//char err_buf[128];
+                        //char *msg = strerror_r(result, err_buf, sizeof(err_buf));
+                        //fprintf(stderr, "Error while writing to server: %s\n", msg);
+			errlog("Send", "write", -1, result, "N/A", client_info.username);
 		}
-
+		
 		// Wait for at least one signal
 		sem_wait(&send_sem);
 	
@@ -305,6 +308,11 @@ int main(int argc, char* argv[]) {
 	// Login message
         send_by_type(settings.socket_fd, LOGIN);
 
+	// Opens error log in /logs
+	if (init_log("Anera_Client") == -1)
+                raise(SIGTERM);
+
+
 	// Thread #1: send to server
 	sem_init(&send_sem, 0, 0);
 	pthread_t send_tid;
@@ -319,6 +327,8 @@ int main(int argc, char* argv[]) {
 		fprintf(stderr, "Failed to receive send thread\n");
 		raise(SIGTERM);
 	}
+
+	
 
 	// Thread Main: Game loop
 	fprintf(stdout, "Connected to server\n");
@@ -366,5 +376,6 @@ int main(int argc, char* argv[]) {
 	pthread_join(send_tid, NULL);
         pthread_join(recv_tid, NULL);
 	sem_destroy(&send_sem);	
+	end_log();
 	return 0;
 }

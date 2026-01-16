@@ -47,7 +47,7 @@ int init_log(char* log_name) {
 		return -1;
 	}
 
-	fprintf(log_f, "==========SERVER START==========\n\n");
+	fprintf(log_f, "==========%s START==========\n\n", log_name);
 	return 0;
 }
 
@@ -72,10 +72,12 @@ int errlog(const char* thread, const char* call, int fd, int errnum, const char*
 		pthread_mutex_unlock(&log_mutex);
 		return -1;
 	}	
-
+	
+	char buf[256];
+	strerror_r(errnum, buf, sizeof(buf));
 	set_time();
 	if (fprintf(log_f, "[%s] | thread: %s | %s | fd=%d | Error: %s -> %s | Client name: %s\n", 
-		    time_s, thread, call, fd, err_desc, strerror(errnum), client) == EOF) {
+		    time_s, thread, call, fd, err_desc, buf, client) == EOF) {
 		fprintf(stderr, "Error writing to log. Ironic\n");
 		pthread_mutex_unlock(&log_mutex);
 		return -1;
