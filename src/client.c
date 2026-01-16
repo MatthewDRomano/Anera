@@ -374,6 +374,7 @@ int main(int argc, char* argv[]) {
 	pthread_join(send_tid, NULL);
         pthread_join(recv_tid, NULL);
 	sem_destroy(&send_sem);	
+	
 	end_log();
 	return 0;
-
+}
