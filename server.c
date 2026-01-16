@@ -67,6 +67,7 @@ void init_def_settings() {
 }
 
 
+
 int parse_args(int argc, char *argv[]) {
 	
 	for (int i = 1; i < argc; i++) {
@@ -116,6 +117,7 @@ int parse_args(int argc, char *argv[]) {
 
 		else {
 			fprintf(stderr, "Invalid argument \"%s\"\n", argv[i]);
+			fprintf(stdout, "usage: ./server [-h] [--port PORT] [--max-players PLAYER_COUNT]\n");
 			return -1;
 		}
 	}
@@ -400,6 +402,9 @@ int main (int argc, char *argv[]) {
 
 	// Creates semaphore w/ owner read / write, otherwise read only
 	cleanup_sem = sem_open("/cleanup_sem", O_CREAT, 0644, 1);
+	// Unlinks named semaphore from kernel 
+	// Semaphore now persists for server lifetime instead of in kernel indefinitely
+	sem_unlink("/cleanup_sem");
 
 	// Spawns reaper thread to cleanup dead client threads
 	pthread_t reaper;
