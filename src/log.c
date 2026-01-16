@@ -39,7 +39,7 @@ int init_log(char* log_name) {
 	memcpy(name, log_name, sizeof(name) - 1);
 
 	set_time();
-	snprintf(log_path, sizeof(log_path), "./logs/%s_log_%s.txt", name, time_s);
+	snprintf(log_path, sizeof(log_path), "../logs/%s_log_%s.txt", name, time_s);
 	
 	log_f = fopen(log_path, "w");
 	if (log_f == NULL) {

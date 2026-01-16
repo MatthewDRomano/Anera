@@ -14,9 +14,7 @@
 
 
 
-# ===== Dev / Compiled files =====
+# ===== Dev Files / Folders =====
 
 *.txt
-server
-client
-
+/build
