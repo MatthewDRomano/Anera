@@ -1,5 +1,3 @@
-//#include "config.h"
-
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -378,4 +376,4 @@ int main(int argc, char* argv[]) {
 	sem_destroy(&send_sem);	
 	end_log();
 	return 0;
-}
+
