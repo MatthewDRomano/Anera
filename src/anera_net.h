@@ -5,6 +5,7 @@
 
 #define MAX_CONNECTIONS 15
 #define DEFAULT_PORT 5555
+#define CLIENT_USERNAME_SIZE
 
 // Bounded Server->Client data transfer rate (every __ ms)
 #define NETWORK_TRANSFER_PERIOD 25
@@ -14,8 +15,7 @@
 typedef enum {
 	LOGIN,
 	LOGOUT,
-	SERVER_UPDATE,
-	CLIENT_UPDATE
+	UPDATE_MESSAGE
 } message_type_t;
 
 // Network safe player info struct

@@ -254,13 +254,15 @@ void* client_io_thread(void* arg) {
 
 	// ms timestamp of last write to client
 	uint64_t last_send_time = now_ms();
-
+	
+	// Temp buffer to read client data into. Later mutex memcpy into ct->net_msg
+	user_data_t buf;
 	while (!atomic_load(&ct->finished)) {
 		pfd.fd = io_fd;
         	pfd.events = POLLIN | POLLOUT;
 		
 		// Waits indiefinitely for ability to read / write to client socket
-		int ready = poll(&pfd, 1, -1); 
+		int ready = poll(&pfd, 1, -1);
 
 		if (ready > 0) {
 			
@@ -273,10 +275,9 @@ void* client_io_thread(void* arg) {
 			// Reads from client	
 			if (pfd.revents & POLLIN) {
 				int result = 0;
-				user_data_t buf;
 				if ((result = full_read(io_fd, &buf, 1)) != 0) {
 					if (result == EOF) 
-						errlog("Client", "read", io_fd, -1, "Player dc (EOF)", buf.username);
+						errlog("Client", "read", io_fd, result, "User dc (EOF)", buf.username);
 					
 					else 
 						errlog("Client", "read", io_fd, result, "N/A", buf.username);
@@ -291,9 +292,17 @@ void* client_io_thread(void* arg) {
 				pthread_mutex_unlock(&clients_mutex);
 				
 
-				if ((message_type_t)buf.type == LOGIN) 
-					errlog("Client", "--JOIN--", -1, -1, "Player connected", buf.username);
-			
+				switch ((message_type_t)buf.type) {
+					case LOGIN:
+						errlog("Client", "--JOIN--", -1, -1, "Player connected", buf.username);
+						break;
+					case UPDATE_MESSAGE:
+						break;
+					// LOGOUT and invalid types are logged but disregarded	
+					default:
+						errlog("Recv", "msg parse", io_fd, -1, "Inv msg type", buf.username);
+						break;
+				}	
 			}
 		
 			// Writes to client
@@ -307,8 +316,8 @@ void* client_io_thread(void* arg) {
 					last_send_time = now_ms();
 
 				int result = 0;
-				if ((result = send_by_type(io_fd, CLIENT_UPDATE)) != 0) {
-					errlog("Client", "write", io_fd, result, "Player dc", ct->net_msg.username);
+				if ((result = send_by_type(io_fd, UPDATE_MESSAGE)) != 0) {
+					errlog("Client", "write", io_fd, result, "Player dc", buf.username);
 					atomic_store(&ct->finished, true);
 					break;
 				}
@@ -321,7 +330,7 @@ void* client_io_thread(void* arg) {
 		// Error occurred during poll()
 		else if (ready < 0)
 			if (errno != EINTR) {
-				errlog("Client", "poll", io_fd, errno, "N/A", ct->net_msg.username);
+				errlog("Client", "poll", io_fd, errno, "N/A", buf.username);
 				atomic_store(&ct->finished, true);
 				break;
 			}
@@ -408,6 +417,7 @@ int main (int argc, char *argv[]) {
 	pthread_t reaper;
 	if (pthread_create(&reaper, NULL, reaper_thread, NULL) != 0) {
 		perror("Failed to spawn reaper thread");
+		sem_close(cleanup_sem);
 		return -1;
 	}
 

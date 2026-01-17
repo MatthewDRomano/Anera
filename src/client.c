@@ -189,13 +189,10 @@ void* recv_thread(void *arg) {
 
 		if ((result = full_read(io_fd, buf, MAX_CONNECTIONS)) != 0) {
 			if (result == EOF)
-				fprintf(stderr, "EOF reach while reading from server\n");
-			else { 
-				//char err_buf[128];
-                                //char *msg = strerror_r(result, err_buf, sizeof(err_buf));
-                                //fprintf(stderr, "Error reading from server: %s\n", msg);
-				errlog("Recv", "read", -1, result, "N/A", client_info.username);
-			}
+				errlog("Recv", "read", io_fd, result, "EOF", client_info.username);
+			else 
+				errlog("Recv", "read", io_fd, result, "N/A", client_info.username);
+
 
 			atomic_store(&settings.connected, false);	
 			break;
@@ -208,22 +205,22 @@ void* recv_thread(void *arg) {
 		message_type_t type = (message_type_t)players[0].type;
 		switch (type) {
 			case LOGOUT:
-				fprintf(stdout, "Disconnected from server");
-				fflush(stdout);
+				errlog("Recv", "msg parse", io_fd, -1, "Disconnect msg recv", client_info.username);
 				atomic_store(&settings.connected, false);
-				shutdown(io_fd, SHUT_RDWR);
 				break;
-			case CLIENT_UPDATE:
+			case UPDATE_MESSAGE:
 				break;
-			// Types LOGIN and SERVER_UPDATE are invalid and cannot be sent
+			// Types LOGIN and invalid types cannot be sent
 			default:
-				fprintf(stderr, "Invalid inbound message type: \"%d\"\n", type);
+				errlog("Recv", "msg parse", io_fd, -1, "Inv msg type", client_info.username);
 				break;
 		}
 	}	
-
+	
+	shutdown(io_fd, SHUT_RDWR);
 	close(io_fd);
 	return NULL;
+
 }
 
 void* send_thread(void *arg) {
@@ -235,13 +232,9 @@ void* send_thread(void *arg) {
 	while (atomic_load(&settings.connected)) {
 		
 		int result = 0;
-		if ((result = send_by_type(io_fd, SERVER_UPDATE)) != 0) {
+		if ((result = send_by_type(io_fd, UPDATE_MESSAGE)) != 0) {
 			atomic_store(&settings.connected, false);
-			
-			//char err_buf[128];
-                        //char *msg = strerror_r(result, err_buf, sizeof(err_buf));
-                        //fprintf(stderr, "Error while writing to server: %s\n", msg);
-			errlog("Send", "write", -1, result, "N/A", client_info.username);
+			errlog("Send", "write", -1, result, "Disconnected", client_info.username);
 		}
 		
 		// Wait for at least one signal
